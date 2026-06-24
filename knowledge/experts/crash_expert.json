@@ -1,0 +1,575 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "崩溃修复专家知识库",
+  "description": "CrashExpert 逆向分析和 GDB 修复知识",
+  "tool_usage_rules": {
+    "description": "工具使用规则：严格区分 radare2 MCP（静态分析）、GDB MCP（动态调试）和 vm_exec（虚拟机操作）三类工具",
+    "radare2_mcp_tools": "静态分析工具，用于二进制反汇编和代码理解（不涉及运行程序）：open_file, analyze, list_all_strings, xrefs_to, disassemble_function, decompile_function, list_functions, list_imports, list_exports, list_symbols, hexdump, search, list_sections。",
+    "gdb_mcp_tools": "动态调试工具，用于远程调试 QEMU 中运行的固件：gdb_start, gdb_command, gdb_set_breakpoint, gdb_continue, gdb_step, gdb_next, gdb_print, gdb_examine, gdb_info_registers, gdb_backtrace, gdb_finish, gdb_load, gdb_terminate。GDB 工具不能用于反汇编代码！只能用于运行时断点、寄存器修改、内存检查。",
+    "vm_exec_usage": "虚拟机命令工具：(1) 运行 ./httpd_start.sh 启动 httpd (2) 检查端口/进程状态 (3) 操作虚拟机内文件。禁止用 vm_exec 执行 r2/radare2 命令。",
+    "forbidden": [
+      "禁止使用 gdb_command 来执行反汇编命令（如 s; pdf, disas, x/ni）",
+      "禁止使用 vm_exec 或 run_command 执行 r2/radare2 命令",
+      "反汇编函数只能用 disassemble_function 工具，不能用 GDB"
+    ]
+  },
+  "gdb_remote_debugging_workflow": {
+    "description": "GDB 远程调试完整流程（固件仿真专用）",
+    "prerequisites": "QEMU 已启动并带有 -s 参数（GDB stub 在 tcp:1234）。静态分析已完成，已通过 disassemble_function 找到需要设置断点的地址。",
+    "steps": [
+      {
+        "order": 1,
+        "action": "启动 GDB 并连接 QEMU",
+        "tool": "gdb_start + gdb_command",
+        "commands": [
+          "gdb_start(gdbPath='gdb-multiarch')",
+          "gdb_load(sessionId='<返回的ID>', program='/宿主机上的/httpd/绝对路径')",
+          "gdb_command(sessionId='<返回的ID>', command='set architecture arm')  // 或 mips",
+          "gdb_command(sessionId='<ID>', command='target remote :1234')"
+        ],
+        "reason": "必须先加载 executable，再连接 QEMU 的 GDB stub。否则 GDB 没有符号和文件上下文。"
+      },
+      {
+        "order": 2,
+        "action": "设置断点（在 httpd 启动之前！）",
+        "tool": "gdb_set_breakpoint 或 gdb_command",
+        "commands": [
+          "gdb_set_breakpoint(sessionId='<ID>', location='*0x2e514')  // 在 cmp 指令处"
+        ],
+        "reason": "必须在启动 httpd 之前设好断点！如果先启动 httpd，它会直接崩溃，断点来不及生效。"
+      },
+      {
+        "order": 3,
+        "action": "启动 httpd",
+        "tool": "vm_exec",
+        "command": "vm_exec(command='./httpd_start.sh')",
+        "reason": "断点已设好，现在启动 httpd。GDB 会在断点处停下。"
+      },
+      {
+        "order": 4,
+        "action": "修改寄存器绕过检查",
+        "tool": "gdb_command",
+        "commands": [
+          "gdb_command(sessionId='<ID>', command='set $r3=1')  // ARM 示例",
+          "gdb_command(sessionId='<ID>', command='c')"
+        ],
+        "reason": "断点命中后修改比较寄存器的值，让条件判断走正确路径，绕过崩溃。然后 continue 继续运行。"
+      },
+      {
+        "order": 5,
+        "action": "验证修复",
+        "tool": "check_service_running",
+        "command": "check_service_running(service_name='httpd')",
+        "reason": "检查 httpd 是否正常运行并在监听端口。如果还有崩溃，重复 1-4 步追加新断点。"
+      }
+    ],
+    "key_principles": [
+      "先设断点，再启动 httpd！顺序不能反，否则 httpd 直接崩溃断点不生效",
+      "连接命令是 target remote :1234（QEMU 的 GDB stub 端口），但必须放在 gdb_load/file 之后",
+      "GDB 用 gdb-multiarch，不是普通的 gdb（因为目标架构是 ARM/MIPS）",
+      "每个崩溃点的修复流程：静态分析找地址 → 连GDB设断点 → 启动httpd → 改寄存器 → continue → 检查是否还有下一个崩溃",
+      "多个崩溃点需要链式修复：每次只处理一个，修复后验证，发现新崩溃则追加断点"
+    ]
+  },
+  "httpd_start_method": "所有 httpd 启动测试统一使用 ./httpd_start.sh，不要手动拼接 httpd 命令。修复完成后用 vm_exec('./httpd_start.sh') 验证。",
+  "crash_source_tracing": {
+    "description": "崩溃溯源：当崩溃地址是无效地址（如 0x80101da0）时，使用 gdb_trace_crash_source 追溯根因",
+    "when_to_use": "崩溃地址是 0x80 开头的无效地址、0x000000 空指针、或 0xffffffff 等垃圾值。反复调试只得到同一个无效地址，没有进展时。",
+    "root_cause": "MIPS 调用外部函数时通过 GOT + jalr $t9 跳转。如果 .so 未加载或 GOT 未填充，$t9 是垃圾值，jalr 就跳到无效地址崩溃。",
+    "workflow": [
+      "1. 调用 gdb_trace_crash_source 捕获崩溃地址，同时静态分析所有外部函数调用点",
+      "2. 从返回结果的 'root_cause_info.external_call_sites' 获取调用点列表",
+      "3. 根据崩溃时机筛选最可能的调用点（通常是初始化阶段的函数，如 apmib_get、nvram_get 等）",
+      "4. 在调用点地址设置 GDB 断点，命中后设置 $v0=0 并跳过调用指令",
+      "5. 跳过方式：set $pc=下一条指令地址（调用点地址 + 4）; set $v0=0"
+    ],
+    "key_principles": [
+      "崩溃地址本身是症状，真正的原因是外部函数调用点的 jalr $t9 指令",
+      "外部函数调用点列表包含 call_address（断点位置）和 target_function（被调用函数名）",
+      "跳过调用的方法：断点命中后，set $pc=call_address+4（跳过 jalr），set $v0=0（表示调用失败）",
+      "初始化阶段的函数（apmib_get、nvram_get 等）通常可以安全跳过，返回 0 表示失败即可",
+      "多个外部函数可能需要逐个跳过，形成断点链"
+    ]
+  },
+  "reverse_engineering_workflow": {
+    "description": "5步逆向分析流程",
+    "steps": [
+      {
+        "step": 1,
+        "name": "定位错误字符串",
+        "tool": "list_all_strings",
+        "action": "搜索错误关键词找到字符串。输出格式为: 序号 paddr vaddr 长度 大小 (段) ascii 内容。必须使用第二个十六进制地址(vaddr=虚拟地址)，不要用第一个(paddr=文件偏移)",
+        "output": "字符串虚拟地址 (vaddr，即第二个 0x 地址)",
+        "critical_warning": "list_all_strings 输出有两个地址！格式: N 0xPADDR 0xVADDR len... 必须取第二个(VADDR)用于 xrefs_to。例如 '1628 0x000d4678 0x000dc678 19...' → 用 0x000dc678 而不是 0x000d4678",
+        "example": "输出: '1628 0x000d4678 0x000dc678 19 20 (.rodata) ascii connect cfm failed!' → vaddr=0x000dc678"
+      },
+      {
+        "step": 2,
+        "name": "追踪交叉引用",
+        "tool": "xrefs_to",
+        "action": "查找哪些函数引用了错误字符串地址",
+        "output": "引用函数名和地址",
+        "critical_next_step": "xrefs_to 返回的函数名通常是自动生成的（如 fcn.0002E420），不是有意义的函数名。不要尝试用 list_functions 搜索函数名！不要使用 vm_exec 或 run_command 执行 r2 命令！必须使用 MCP 工具 disassemble_function 反汇编该函数地址。",
+        "example": "xrefs_to('0x000dc678') 返回 fcn.0002E420 0x2E540 → 提取函数起始地址 0x2E420，下一步执行 disassemble_function(address='0x2E420') 反汇编整个函数",
+        "forbidden_actions": [
+          "不要用 vm_exec 执行 r2 命令来反汇编函数",
+          "不要用 run_command 执行 r2 命令来反汇编函数",
+          "不要在宿主机上直接运行 r2 二进制",
+          "必须使用 radare2 MCP 工具（disassemble_function、decompile_function 等）进行二进制分析"
+        ]
+      },
+      {
+        "step": 3,
+        "name": "反汇编引用函数",
+        "tool": "disassemble_function",
+        "action": "反汇编 xrefs_to 返回的函数（使用返回的函数地址如 0x2E420），找到条件检查逻辑",
+        "output": "函数的完整汇编代码",
+        "what_to_look_for": [
+          "bl/b 指令 — 函数调用（如 bl fcn.XXXXX 调用 ConnectCfm 等子函数）",
+          "调用返回后的 cmp/test 指令 — 检查返回值",
+          "条件跳转 bne/beq/bgt/blt — 根据返回值决定走错误路径还是正常路径",
+          "错误字符串的引用 — 确认是哪个检查失败后打印的"
+        ],
+        "key_principle": "ARM 固件中函数可能没有符号名，只有 fcn.XXXXX 这样的自动名称。不要搜索函数名，直接反汇编地址。"
+      },
+      {
+        "step": 4,
+        "name": "定位条件跳转",
+        "action": "从反汇编结果中，找到函数调用返回后的比较/条件跳转指令，这就是断点位置",
+        "mips_branch_instructions": [
+          "beqz - 等于零跳转",
+          "bnez - 不等于零跳转",
+          "beq - 相等跳转",
+          "bne - 不相等跳转",
+          "bgez - 大于等于零跳转",
+          "bltz - 小于零跳转"
+        ],
+        "arm_branch_instructions": [
+          "cmp - 比较指令",
+          "bgt - 大于跳转",
+          "blt - 小于跳转",
+          "beq - 相等跳转",
+          "bne - 不相等跳转",
+          "bleq - 小于等于跳转"
+        ],
+        "output": "比较/跳转地址（断点位置）、判断的寄存器、绕过崩溃需要的寄存器值",
+        "key_principle": "断点设在 cmp/beqz/bnez 等比较指令处，不是 bl/jal 调用指令处"
+      },
+      {
+        "step": 5,
+        "name": "GDB 远程调试修复",
+        "description": "前面的步骤 1-4 是静态分析（radare2），已经找到了断点地址。现在切换到 GDB 动态调试，在 QEMU 中实际运行 httpd 并绕过崩溃点。",
+        "prerequisite": "必须先完成步骤 1-4（静态分析），知道确切的断点地址和寄存器修改值，才能进行 GDB 调试。不要跳过静态分析直接用 GDB。",
+        "workflow": [
+          "1. gdb_start(gdbPath='gdb-multiarch') — 启动 GDB，获取 sessionId",
+          "2. gdb_load(sessionId, '/宿主机上的/httpd/绝对路径') — 先加载 executable",
+          "3. gdb_command(sessionId, 'set architecture arm') — 设置目标架构",
+          "4. gdb_command(sessionId, 'target remote :1234') — 连接 QEMU 的 GDB stub",
+          "5. gdb_set_breakpoint(sessionId, location='*0x断点地址') — 在 cmp/条件跳转处设断点（必须在启动 httpd 之前！）",
+          "6. vm_exec(command='./httpd_start.sh') — 启动 httpd（断点已设好，GDB 会在断点处停下）",
+          "7. gdb_command(sessionId, 'set $r3=1') — 修改寄存器绕过检查",
+          "8. gdb_command(sessionId, 'c') — 继续执行",
+          "9. check_service_running(service_name='httpd') — 验证 httpd 是否正常运行",
+          "10. 如果还有崩溃，回到步骤 5 追加新断点（链式修复）"
+        ],
+        "key_principle": "断点必须设在函数调用返回后的 cmp/beqz/bnez 等比较指令处，不能设在 bl/jal 调用指令处。在 bl/jal 处改寄存器无意义，因为调用执行后函数返回值会覆盖寄存器。",
+        "incremental_workflow": {
+          "description": "增量更新 GDB 断点链：每次绕过成功后在状态里保留已有断点，再追加新断点，避免覆盖之前的断点",
+          "steps": [
+            "1. 读取当前已确认的 breakpoint_chain",
+            "2. 追加新的 cmp/条件跳转断点地址",
+            "3. 用 gdb_set_breakpoint 重新设置完整断点链",
+            "4. 将所有断点的寄存器修改一起返回，最终形成完整的断点链"
+          ],
+          "example": "第1轮：breakpoint_chain=['0x2e50c'] → 第2轮：追加 '0x2e538' → 返回 ['0x2e50c','0x2e538'] 和对应寄存器修改"
+        },
+        "example_mips": {
+          "description": "MIPS: beqz $v0, error_path",
+          "breakpoints": [
+            "0x408c20 (beqz 指令地址，不是前面的 jal)"
+          ],
+          "register_values": {
+            "0x408c20": {
+              "$v0": "1"
+            }
+          }
+        },
+        "example_arm": {
+          "description": "ARM: cmp r3, 0; bgt exit_loop",
+          "breakpoints": [
+            "0x2e514 (cmp 指令地址，不是前面的 bl)"
+          ],
+          "register_values": {
+            "0x2e514": {
+              "$r3": "1"
+            }
+          }
+        }
+      }
+    ]
+  },
+  "mips_calling_convention": {
+    "description": "MIPS 函数调用约定",
+    "argument_registers": [
+      "$a0",
+      "$a1",
+      "$a2",
+      "$a3"
+    ],
+    "return_value": "$v0",
+    "stack_pointer": "$sp",
+    "return_address": "$ra",
+    "important_registers": {
+      "$v0": "函数返回值，常用于条件判断",
+      "$a0": "第一个参数",
+      "$t0-$t9": "临时寄存器",
+      "$s0-$s7": "保存寄存器"
+    }
+  },
+  "breakpoint_chaining_technique": {
+    "description": "断点链式跳过方法：逐步设置断点并修改寄存器，依次绕过多个崩溃点，直到程序正常运行",
+    "principle": "固件仿真中常遇到多个连续的崩溃点（如NVRAM检查、硬件检测、配置初始化等）。每个崩溃点都需要单独绕过。通过逐个设置断点、继续执行、修改寄存器值的方式，可以依次跳过所有崩溃点。每次成功跳过后，观察下一个崩溃地址并追加断点，形成链式修复。",
+    "gdb_workflow": [
+      "1. gdb_start 启动会话",
+      "2. gdb_load 加载宿主机上的 httpd 二进制",
+      "3. set architecture arm/mips",
+      "4. target remote :1234",
+      "5. 分析崩溃日志/反汇编，确定第一个崩溃地址 addr1",
+      "6. 设置断点: b *addr1",
+      "7. 继续执行: c",
+      "8. 命中断点后，修改寄存器绕过检查: set $v0=1（或其他需要的值）",
+      "9. 观察下一个崩溃地址 addr2，设置断点: b *addr2",
+      "10. 继续执行: c",
+      "11. 命中后再次修改寄存器: set $v0=1",
+      "12. 重复步骤9-11，直到程序不再崩溃、正常运行"
+    ],
+    "multi_breakpoint_example": {
+      "description": "典型的多断点链式跳过示例（MIPS固件常见场景）",
+      "steps": [
+        {
+          "order": 1,
+          "address": "0x433a68",
+          "action": "b *0x433a68; c",
+          "patch": "set $v0=1",
+          "reason": "第一个崩溃点，通常是初始化检查"
+        },
+        {
+          "order": 2,
+          "address": "0x433ab4",
+          "action": "b *0x433ab4; c",
+          "patch": "set $v0=1",
+          "reason": "第二个崩溃点，跳过后继续"
+        },
+        {
+          "order": 3,
+          "address": "0x433b08",
+          "action": "b *0x433b08; c",
+          "patch": "set $v0=1",
+          "reason": "第三个崩溃点"
+        },
+        {
+          "order": 4,
+          "address": "0x433b58",
+          "action": "b *0x433b58; c",
+          "patch": "set $v0=1",
+          "reason": "第四个崩溃点，跳过后程序可能正常运行"
+        }
+      ]
+    },
+    "key_rules": [
+      "每次只追加一个新断点，不要一次性设置所有断点（避免遗漏中间崩溃点）",
+      "命中断点后先观察寄存器状态再决定修改哪个寄存器及值",
+      "MIPS架构中 $v0 是函数返回值，最常被修改为 1（成功）来绕过检查",
+      "如果 set $v0=1 无效，尝试 $a0（参数寄存器）或其他相关寄存器",
+      "每跳过一个崩溃点后记录地址和修改内容，便于最终生成完整的GDB脚本",
+      "当连续多次 c 后不再触发新崩溃时，说明已成功绕过所有崩溃点"
+    ],
+    "script_generation": {
+      "description": "链式调试完成后，将所有断点和修改汇总为一个可复用的GDB脚本",
+      "template": [
+        "file /path/to/httpd",
+        "target remote :1234",
+        "b *addr1",
+        "b *addr2",
+        "b *addr3",
+        "c",
+        "set $v0=1",
+        "c",
+        "set $v0=1",
+        "c",
+        "set $v0=1"
+      ]
+    },
+    "call_skip_pattern": {
+      "description": "调用点直接跳过模式：对于某些高风险初始化函数，不必进入函数内部分析，而是在调用指令处命中断点后直接跳过 jal/jalr，并手工设置返回值。适用于 save_cs_to_file、flash 初始化、配置导出等副作用强且可安全短路的调用。",
+      "when_to_use": [
+        "启动阶段崩溃发生在某个副作用强的初始化函数之后",
+        "该函数的 stub/no-op 版本已被验证能让程序继续运行",
+        "目标函数返回值只用于表示成功/失败，跳过后可接受",
+        "MIPS 固件中调用点是 jal/jalr，跳过后设置 $pc=call_address+4"
+      ],
+      "workflow": [
+        "1. 通过反汇编定位调用指令地址 call_address（如 jal save_cs_to_file）",
+        "2. 在调用指令地址设置断点：b *call_address",
+        "3. 启动程序并等待命中断点",
+        "4. 命中后直接跳过调用：set $pc=call_address+4",
+        "5. 根据语义设置返回值：set $v0=0（失败/空操作）或 set $v0=1（成功）",
+        "6. continue 继续执行，观察是否进入下一个崩溃点"
+      ],
+      "key_rules": [
+        "这种模式的断点位置就是调用指令本身，不是调用后的 cmp 指令",
+        "只适用于确认可以安全短路的函数；普通逻辑判断仍优先使用 cmp/beqz/bnez 断点模式",
+        "MIPS 下跳过一条 jal/jalr 指令通常使用 set $pc=call_address+4",
+        "返回值必须和调用方语义一致：若调用方不检查返回值，通常设 $v0=0 即可；若后续比较 success/failure，则需按语义决定 0/1"
+      ],
+      "gdb_template": [
+        "set architecture mips",
+        "file /path/to/httpd_or_boa",
+        "target remote :1234",
+        "b *0xCALLADDR",
+        "c",
+        "set $pc=0xCALLADDR+4",
+        "set $v0=0",
+        "detach"
+      ]
+    }
+  },
+  "common_crash_patterns": {
+    "mips_segfault": {
+      "cause": "访问未映射的内存地址",
+      "fix": "找到崩溃前的条件检查，通过修改寄存器跳过崩溃路径"
+    },
+    "invalid_address_jump": {
+      "cause": "跳转/调用到无效地址（0x80xxxxxx、0x000000、0xffffffff）。函数指针未初始化、配置数据损坏、MIB 读取错误",
+      "fix": "使用 gdb_trace_crash_source 追溯调用链，找到首次加载无效值的函数。分析该函数逻辑，修改返回值或修补跳转",
+      "example": "apmib_init 后某个函数读取了未初始化的配置结构体，将垃圾值作为函数指针调用"
+    },
+    "null_pointer_deref": {
+      "cause": "访问 NULL 指针",
+      "fix": "在访问前设置寄存器为非零值或跳转到错误处理分支"
+    },
+    "init_mib_failed": {
+      "cause": "MIB/配置初始化失败（常见于 D-Link 固件）",
+      "fix": "在 MIB 初始化检查处修改返回值为成功"
+    },
+    "realtek_save_cs_to_file_crash": {
+      "cause": "Realtek/TOTOLINK 固件在 Web 初始化早期调用 save_cs_to_file()，该函数会触发 current-setting/csconf 相关 flash 导出或压缩写回。QEMU/NVRAM 仿真环境不满足其预期时，常在该调用后崩溃。",
+      "fix": "优先使用调用点直接跳过模式：在 jal save_cs_to_file 的调用地址处设断点，命中后 set $pc=call_address+4，必要时 set $v0=0，然后继续执行。若跳过后程序可继续运行，说明该函数可被视为高风险副作用初始化并短路。",
+      "example": "TOTOLINK N150RT 的 boa 在 asp_init 路径里，apmib_init() 成功后立即调用 save_cs_to_file()；跳过该调用可避免早期段错误。"
+    },
+    "tenda_check_network_loop": {
+      "cause": "Tenda 固件 httpd 的 main 函数中存在 while(check_network() <= 0) sleep(1) 无限循环。check_network 检测硬件网络接口状态，QEMU 环境下永远返回 0，导致 httpd 卡死",
+      "vendor": "Tenda",
+      "httpd_signatures": [
+        "WeLoveLinux",
+        "Welcome to",
+        "init_core_dump",
+        "connect cfm failed",
+        "connect: No such file or directory",
+        "Connect to server failed.",
+        "create socket  fail -1"
+      ],
+      "fix": "在 check_network 返回后的比较指令处设断点（不是 bl 调用指令），命中后修改比较寄存器跳出循环",
+      "workflow": [
+        "1. list_functions 找到相关函数地址",
+        "2. disassemble_function 反汇编，找到 bl sym.imp.check_network 指令及其后面的 cmp/bgt 指令",
+        "3. gdb_set_breakpoint: 在 cmp 指令地址设断点（不是 bl 指令地址）",
+        "4. 断点命中后: set $r3=1（ARM，让 cmp 判断为 >0，bgt 跳出循环）",
+        "5. continue 让程序继续执行"
+      ],
+      "key_principle": "断点必须设在函数调用返回之后的比较指令（cmp/beqz/bnez）处，不能设在 bl/jal 调用指令处。因为在 bl 处设断点时，即使修改了返回寄存器，bl 执行后函数会覆盖寄存器值。"
+    },
+    "tenda_connect_cfm_crash": {
+      "cause": "Tenda 固件 httpd main 函数在 check_network 循环后调用 ConnectCfm()，该函数通过 Unix socket 连接 CFM 服务进程（cfm daemon），QEMU 中 cfm 进程不存在导致 connect() 返回 ENOENT",
+      "vendor": "Tenda",
+      "startup_log_signatures": [
+        "connect: No such file or directory",
+        "Connect to server failed.",
+        "connect cfm failed!",
+        "create socket  fail -1"
+      ],
+      "root_cause_detail": "ConnectCfm() 内部流程: socket() → connect(/var/cfm_sock 或类似 Unix socket) → 失败因为 cfm daemon 未运行 → 打印 'connect: No such file or directory' 和 'Connect to server failed.' → 返回错误 → httpd 打印 'connect cfm failed!' → 如果未正确处理则崩溃或卡住",
+      "fix": "在 ConnectCfm 返回后的比较指令处设断点，修改寄存器让条件判断通过",
+      "workflow": [
+        "1. list_all_strings(filter='connect cfm') 找到字符串地址",
+        "2. xrefs_to(address=字符串地址) 找到引用函数（通常是 fcn.XXXXX 格式，不是 sym.imp.ConnectCfm）",
+        "3. disassemble_function(address=引用函数地址) 反汇编整个函数，找到 bl（调用子函数）后面的 cmp + 条件跳转",
+        "4. 注意：ConnectCfm 是本地函数（fcn.XXXXX），不是导入函数（sym.imp.XXXXX），所以 list_functions 搜不到",
+        "5. 从反汇编中定位：bl fcn.XXXXX（调用ConnectCfm）→ cmp r3, 0 → bne/bgt/beq 等条件跳转",
+        "6. gdb_set_breakpoint: 在 cmp 指令地址设断点，根据跳转方向决定修改哪个寄存器及值"
+      ],
+      "key_principle": "断点必须设在 cmp 指令处（不是 bl 调用指令），因为在 bl 处修改寄存器会被函数返回值覆盖。bne（不等于则跳转）：r3=0 不跳转，r3!=0 跳转。需要反汇编目标地址确认是错误处理还是正常流程。",
+      "common_mistake": "错误地在 bl 指令处设断点，或未分析跳转目标就盲目设置寄存器值",
+      "analysis_required": "必须反汇编 bne 的目标地址，确认是错误处理（如打印错误、exit）还是正常流程，再决定 r3 的值"
+    }
+  },
+  "waiting_loop_patterns": {
+    "description": "等待循环：httpd 进程运行中但端口未开放，卡在某个阻塞调用",
+    "common_causes": [
+      "while(check_network() <= 0) sleep(1) - 网络检测循环",
+      "open() 阻塞在设备文件（如 /dev/mtd、/dev/gpio）",
+      "ConnectCfm() 等 CFM 管理函数阻塞",
+      "apmib_init() 等待 NVRAM 初始化",
+      "sem_wait/lockf 等待信号量或文件锁"
+    ],
+    "analysis_strategy": {
+      "step1": "从启动日志提取 httpd 输出的字符串（如 Welcome、init_core_dump、connect cfm failed），用 list_all_strings 搜索（先 open_file + analyze）",
+      "step2": "xrefs_to 找引用函数。如果返回了 fcn.XXXXX 格式的函数，直接 disassemble_function 反汇编它",
+      "step3": "如果 xrefs_to 为空或结果不可信，改为反汇编 main 函数",
+      "step4": "从反汇编结果中找到 bl 指令（函数调用）后面的 cmp + 条件跳转，设 GDB 断点"
+    }
+  },
+  "string_xref_fallback": {
+    "description": "xrefs_to 结果的多种异常情况及处理策略",
+    "scenarios": {
+      "empty_result": {
+        "cause": "ARM/MIPS 固件中字符串通过 PC 相对寻址加载（ldr r0, [pc, #offset]），radare2 的浅层分析无法建立交叉引用",
+        "action": "直接反汇编 main 函数（disassemble_function(address='main')），从 bl 指令列表中找相关调用点"
+      },
+      "unnamed_function": {
+        "cause": "xrefs_to 返回 fcn.XXXXX 格式的函数（无符号名），这是正常情况——固件函数通常没有调试符号",
+        "action": "不要尝试用 list_functions 搜索函数名！直接 disassemble_function(address='0xXXXXX') 反汇编该函数的完整代码，从中找条件检查逻辑",
+        "wrong_action": "用 list_functions(filter='ConnectCfm') 搜索有意义的函数名——这是浪费时间，固件中没有符号名"
+      },
+      "wrong_addresses": {
+        "cause": "radare2 基址检测错误导致所有地址偏移",
+        "action": "如果地址与预期明显不一致，反汇编 main 函数从头分析，不依赖 xrefs_to 的地址"
+      }
+    },
+    "golden_rule": "xrefs_to 返回结果后，下一步永远是 disassemble_function 反汇编那个函数，而不是搜索函数名或反复调用 xrefs_to"
+  },
+  "marker_file_waiting_pattern": {
+    "description": "标记文件等待模式：程序在启动时检查某个标记文件是否存在，如果不存在则进入等待循环",
+    "common_marker_files": [
+      "/tmp/jffs2_ready",
+      "/tmp/mtd_ready",
+      "/tmp/flash_ready",
+      "/tmp/system_ready",
+      "/var/run/init_done"
+    ],
+    "detection_signs": {
+      "process_state": "进程运行但端口未开放，进程不崩溃也不退出",
+      "log_patterns": [
+        "程序启动后没有任何输出",
+        "创建了某个 ready 文件（如 /tmp/uhttpd_ready）但服务未启动",
+        "进程 wchan 显示等待状态"
+      ],
+      "static_analysis": [
+        "反汇编中发现循环检查文件存在性的代码模式",
+        "字符串中包含 *_ready、*_done、*_init 等标记文件路径",
+        "循环中调用 access()、stat()、open() 检查文件 + sleep/sysinfo 等待"
+      ]
+    },
+    "typical_code_pattern": {
+      "description": "ARM/MIPS 固件中常见的标记文件等待循环",
+      "assembly_example": [
+        "loop_start:",
+        "  ldr r0, [pc, #offset]  ; 加载文件路径字符串地址（如 '/tmp/jffs2_ready'）",
+        "  movs r1, 0             ; access() 的第二个参数（F_OK）",
+        "  bl access              ; 或 stat、open 等系统调用",
+        "  cmp r0, 0              ; 检查返回值",
+        "  bge exit_loop          ; 如果 >= 0（文件存在），退出循环",
+        "  ; 文件不存在，继续等待",
+        "  subs r5, 1             ; 递减计数器",
+        "  beq exit_loop          ; 如果计数器为0，退出",
+        "  movs r0, 1             ; sleep 参数",
+        "  bl sleep               ; 或 sysinfo、usleep",
+        "  b loop_start           ; 循环回去"
+      ],
+      "key_characteristics": [
+        "循环中有文件路径字符串引用",
+        "调用 access/stat/open 等文件检查函数",
+        "有 sleep/usleep/sysinfo 等延迟调用",
+        "有计数器递减和条件跳转"
+      ]
+    },
+    "fix_strategy": {
+      "priority": "优先级最高！如果检测到标记文件等待模式，应该首先尝试创建标记文件",
+      "simple_fix": {
+        "description": "直接创建标记文件（最简单有效的方法）",
+        "command": "vm_exec(command='touch /tmp/jffs2_ready')",
+        "when_to_use": "当反汇编或日志明确显示程序在等待某个标记文件时",
+        "advantages": [
+          "无需修改二进制",
+          "无需设置断点",
+          "立即生效",
+          "不影响程序其他逻辑"
+        ]
+      },
+      "gdb_bypass": {
+        "description": "使用 GDB 修改寄存器绕过检查（备选方案）",
+        "when_to_use": "创建标记文件后仍然失败，或者标记文件检查逻辑复杂",
+        "steps": [
+          "1. 找到检查标记文件的 cmp 指令地址",
+          "2. 在 cmp 指令处设置断点",
+          "3. 启动 httpd",
+          "4. 断点触发后，修改寄存器让条件判断通过（如 set $r0=0）",
+          "5. continue 继续执行"
+        ]
+      }
+    },
+    "workflow": {
+      "step1": "检测标记文件等待模式",
+      "step1_methods": [
+        "从反汇编中搜索 *_ready、*_done 等字符串",
+        "检查进程状态：运行但端口未开放",
+        "查看 /proc/<pid>/wchan 是否显示等待状态"
+      ],
+      "step2": "识别标记文件路径",
+      "step2_methods": [
+        "list_all_strings(filter='ready') 搜索标记文件路径",
+        "xrefs_to 找到引用位置",
+        "disassemble_function 确认是等待循环"
+      ],
+      "step3": "创建标记文件",
+      "step3_command": "vm_exec(command='touch /tmp/<marker_file>')",
+      "step4": "重启服务验证",
+      "step4_commands": [
+        "vm_exec(command='killall httpd')",
+        "start_httpd()",
+        "validate_network_stack() 验证端口是否开放"
+      ]
+    },
+    "case_study": {
+      "firmware": "TP-Link IPC uhttpd",
+      "symptom": "uhttpd 进程运行但端口 80 未开放",
+      "analysis": "反汇编发现 main 函数在 0x137e0 处有循环检查 /tmp/jffs2_ready，如果文件不存在则调用 sysinfo 等待后重试",
+      "solution": "vm_exec(command='touch /tmp/jffs2_ready') 创建标记文件",
+      "result": "uhttpd 成功启动并监听端口 80"
+    },
+    "realtek_totolink_n150rt": {
+      "firmware": "TOTOLINK N150RT (N150RT-V3.4.0-B20190525)",
+      "architecture": "mipseb",
+      "httpd": "/bin/boa",
+      "symptom": "boa 启动后早期段错误；大 stub 验证表明 save_cs_to_file 被短路后可继续运行",
+      "reverse_engineering_summary": [
+        "在 asp_init 初始化路径中，apmib_init() 成功后立即调用 save_cs_to_file()",
+        "随后会执行 apmib_get(104, &unk_4718C8) 和接口名初始化",
+        "因此 save_cs_to_file 是比 apmib_get(104) 更早且更可疑的崩点"
+      ],
+      "validated_gdb_bypass": {
+        "script": [
+          "set architecture mips",
+          "file /home/iot/Desktop/FirmCure/firmware/totolink/_N150RT-V3.4.0-B20190525.zip.extracted/N150RT-V3.4.0-B20190525/_TOTOLINK-N150RT-V3.4.0-B20190525.1055.web.extracted/squashfs-root/bin/boa",
+          "target remote :1234",
+          "b *0x40EAD0",
+          "c",
+          "set $pc=0x40EAD4",
+          "detach"
+        ],
+        "note": "该断点命中的是 save_cs_to_file 的调用点；通过直接跳过调用，可验证该函数是否为当前 case 的主要崩点。"
+      },
+      "recommended_strategy": [
+        "先用调用点直接跳过模式验证 save_cs_to_file 是否为首要崩点",
+        "如果跳过后仍崩溃，再对 apmib_get(104) 做 special-case 分析",
+        "长期修复建议将 save_cs_to_file 做成 companion shim，而不是继续扩大整库 stub 范围"
+      ]
+    },
+    "important_notes": [
+      "标记文件通常在 /tmp、/var/run 等临时目录",
+      "某些固件会在启动脚本中创建这些文件，但仿真环境可能缺失相关初始化",
+      "创建标记文件是最简单直接的修复方法，应该优先尝试",
+      "不要误判：如果程序创建了 /tmp/uhttpd_ready 但仍在等待，说明它在等待另一个文件（如 /tmp/jffs2_ready）"
+    ]
+  }
+}

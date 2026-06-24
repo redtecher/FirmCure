@@ -1,0 +1,20 @@
+# FirmDissector 依赖
+
+# 必需的外部工具 (需要通过系统包管理器安装):
+# - binwalk: 固件分析工具
+#   Ubuntu/Debian: sudo apt install binwalk
+#   Arch: sudo pacman -S binwalk
+#
+# - ubireader: UBI/UBIFS 提取工具 (推荐，可更好地处理 UBI 镜像)
+#   Ubuntu/Debian: sudo apt install ubireader
+#   或从源码安装: https://github.com/jrspruitt/ubi_reader
+#   或使用 pip: pip install ubi-reader
+
+# Python 依赖:
+# 无额外Python依赖，仅使用标准库
+
+# 可选 (用于增强功能):
+# python-magic  # 文件类型检测
+# colorama      # 彩色终端输出
+
+

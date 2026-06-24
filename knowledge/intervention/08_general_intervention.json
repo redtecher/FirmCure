@@ -1,0 +1,405 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "通用干预知识库",
+  "description": "包含历史案例库、推理模板和策略组合规则",
+  "case_library": [
+    {
+      "case_id": "case_001",
+      "firmware": {
+        "vendor": "TP-Link",
+        "model": "WR841N",
+        "version": "v13"
+      },
+      "error_pattern": "unhandled exception in init script S50telephony",
+      "semantic_tags": [
+        "init_script",
+        "exception",
+        "telephony_service",
+        "startup_phase"
+      ],
+      "intervention_plan": [
+        {
+          "step": 1,
+          "action": "analyze_init_script_for_error_handling",
+          "tool": "serial_tool",
+          "command": "cat /etc/init.d/S50telephony",
+          "result": "Found try-catch missing around critical section"
+        },
+        {
+          "step": 2,
+          "action": "wrap_script_with_try_catch",
+          "tool": "virtio_9p_tool",
+          "command": "Inject error handling wrapper",
+          "result": "Modified init script with try-catch"
+        },
+        {
+          "step": 3,
+          "action": "restart_service",
+          "tool": "serial_tool",
+          "command": "/etc/init.d/S50telephony restart",
+          "result": "Service started successfully"
+        }
+      ],
+      "outcome": "success",
+      "learnings": "init scripts need error handling wrapper for telephony services",
+      "applicable_to": [
+        "init_script_exceptions",
+        "service_startup_failures"
+      ]
+    },
+    {
+      "case_id": "case_002",
+      "firmware": {
+        "vendor": "Netgear",
+        "model": "R6220"
+      },
+      "error_pattern": "kernel module loading failure: bcm_ioctl not found",
+      "semantic_tags": [
+        "kernel",
+        "module",
+        "insmod",
+        "dependency"
+      ],
+      "intervention_plan": [
+        {
+          "step": 1,
+          "action": "identify_missing_dependencies",
+          "tool": "serial_tool",
+          "command": "lsmod | grep bcm",
+          "result": "No related modules loaded"
+        },
+        {
+          "step": 2,
+          "action": "extract_module_from_firmware",
+          "tool": "virtio_9p_tool",
+          "command": "Copy bcm_ioctl.ko from firmware package",
+          "result": "Module extracted and placed in /lib/modules/"
+        },
+        {
+          "step": 3,
+          "action": "load_with_modprobe",
+          "tool": "serial_tool",
+          "command": "modprobe bcm_ioctl",
+          "result": "Module loaded successfully"
+        },
+        {
+          "step": 4,
+          "action": "persist_module",
+          "tool": "virtio_9p_tool",
+          "command": "Add to /etc/modules",
+          "result": "Module configured to load on boot"
+        }
+      ],
+      "outcome": "success",
+      "learnings": "kernel module dependencies must be extracted from firmware package",
+      "applicable_to": [
+        "kernel_module_failures",
+        "insmod_errors"
+      ]
+    },
+    {
+      "case_id": "case_003",
+      "firmware": {
+        "vendor": "D-Link",
+        "model": "DIR-882"
+      },
+      "error_pattern": "web UI returns 500 Internal Server Error",
+      "semantic_tags": [
+        "web_service",
+        "http_error",
+        "cgi_failure",
+        "luac_error"
+      ],
+      "intervention_plan": [
+        {
+          "step": 1,
+          "action": "check_web_server_logs",
+          "tool": "serial_tool",
+          "command": "tail -n 50 /var/log/httpd.log",
+          "result": "Found Lua compilation error in /usr/lib/lua/luci/*.lua"
+        },
+        {
+          "step": 2,
+          "action": "syntax_check_lua_files",
+          "tool": "serial_tool",
+          "command": "lua -c /usr/lib/lua/luci/*.lua",
+          "result": "Syntax error in controller.lua"
+        },
+        {
+          "step": 3,
+          "action": "fix_lua_syntax",
+          "tool": "virtio_9p_tool",
+          "command": "Correct syntax error in controller.lua",
+          "result": "Lua syntax corrected"
+        },
+        {
+          "step": 4,
+          "action": "restart_web_service",
+          "tool": "serial_tool",
+          "command": "/etc/init.d/uhttpd restart",
+          "result": "Web UI accessible"
+        }
+      ],
+      "outcome": "success",
+      "learnings": "Lua syntax errors in LuCI web interface cause 500 errors",
+      "applicable_to": [
+        "web_ui_failures",
+        "lua_errors"
+      ]
+    },
+    {
+      "case_id": "case_004",
+      "firmware": {
+        "vendor": "Tenda",
+        "model": "AC9"
+      },
+      "error_pattern": "upnp daemon crashes with SIGSEGV on startup",
+      "semantic_tags": [
+        "upnp",
+        "sigsegv",
+        "crash",
+        "memory_corruption"
+      ],
+      "intervention_plan": [
+        {
+          "step": 1,
+          "action": "capture_crash_backtrace",
+          "tool": "gdb_tool",
+          "command": "attach to upnpd and get backtrace",
+          "result": "Crash in uuid_create() function"
+        },
+        {
+          "step": 2,
+          "action": "patch_problematic_function",
+          "tool": "gdb_tool",
+          "command": "skip uuid_create call and return mock UUID",
+          "result": "Function bypassed"
+        },
+        {
+          "step": 3,
+          "action": "restart_service",
+          "tool": "serial_tool",
+          "command": "/etc/init.d/upnp start",
+          "result": "upnpd runs without crash"
+        }
+      ],
+      "outcome": "success",
+      "learnings": "UUID generation can be bypassed for UPnP in embedded devices",
+      "applicable_to": [
+        "service_crashes",
+        "sigsegv_errors"
+      ]
+    },
+    {
+      "case_id": "case_005",
+      "firmware": {
+        "vendor": "ASUS",
+        "model": "RT-AC68U"
+      },
+      "error_pattern": "wireless interface fails to come up",
+      "semantic_tags": [
+        "wireless",
+        "wlan",
+        "driver",
+        "firmware_loading"
+      ],
+      "intervention_plan": [
+        {
+          "step": 1,
+          "action": "check_wireless_driver",
+          "tool": "serial_tool",
+          "command": "lsmod | grep wlan && dmesg | grep -i wifi",
+          "result": "Driver loaded but firmware file missing"
+        },
+        {
+          "step": 2,
+          "action": "extract_firmware_binary",
+          "tool": "virtio_9p_tool",
+          "command": "Extract wl_fw.bin from original firmware package",
+          "result": "Firmware extracted to /lib/firmware/"
+        },
+        {
+          "step": 3,
+          "action": "reload_wireless_module",
+          "tool": "serial_tool",
+          "command": "rmmod wl && modprobe wl",
+          "result": "Wireless interface up"
+        }
+      ],
+      "outcome": "success",
+      "learnings": "Wireless firmware binaries must be extracted from vendor firmware",
+      "applicable_to": [
+        "wireless_failures",
+        "firmware_missing"
+      ]
+    }
+  ],
+  "reasoning_templates": {
+    "unknown_boot_error": {
+      "description": "未知启动错误的推理模板",
+      "analysis_steps": [
+        "1. Collect full boot log from serial",
+        "2. Identify last successful initialization",
+        "3. Identify first failure point",
+        "4. Check for dependency chain issues",
+        "5. Search for similar cases in knowledge base"
+      ],
+      "intervention_approaches": [
+        "Comment out failing service in /etc/inittab",
+        "Wrap failing service with error handler",
+        "Bypass service if non-essential",
+        "Fix root cause if identifiable"
+      ]
+    },
+    "runtime_service_crash": {
+      "description": "运行时服务崩溃的推理模板",
+      "analysis_steps": [
+        "1. Capture core dump if possible",
+        "2. Get backtrace with GDB",
+        "3. Identify crash location and type",
+        "4. Check for missing resources",
+        "5. Search for driver/library incompatibility"
+      ],
+      "intervention_approaches": [
+        "Patch problematic code segment",
+        "Replace with stub implementation",
+        "Fix missing dependencies",
+        "Downgrade/upgrade library versions"
+      ]
+    },
+    "network_service_failure": {
+      "description": "网络服务失败的推理模板",
+      "analysis_steps": [
+        "1. Check service configuration",
+        "2. Verify network interface status",
+        "3. Test port binding",
+        "4. Check for conflicts",
+        "5. Examine service logs"
+      ],
+      "intervention_approaches": [
+        "Reconfigure service ports",
+        "Fix permission issues",
+        "Resolve port conflicts",
+        "Update configuration files"
+      ]
+    }
+  },
+  "strategy_combination": {
+    "description": "组合多个已验证的策略解决复杂问题",
+    "examples": [
+      {
+        "name": "web_service_comprehensive_fix",
+        "description": "Web服务综合修复策略",
+        "strategies": [
+          "fix_permission_errors",
+          "restore_missing_configs",
+          "resolve_port_conflicts",
+          "create_missing_device_nodes"
+        ],
+        "execution_order": [
+          1,
+          2,
+          3,
+          4
+        ]
+      },
+      {
+        "name": "boot_process_recovery",
+        "description": "启动进程恢复策略",
+        "strategies": [
+          "fix_init_scripts",
+          "restore_libraries",
+          "create_devices",
+          "fix_permissions"
+        ],
+        "execution_order": [
+          2,
+          3,
+          1,
+          4
+        ]
+      },
+      {
+        "name": "kernel_module_dependency_chain",
+        "description": "内核模块依赖链修复",
+        "strategies": [
+          "extract_kernel_modules",
+          "resolve_dependencies",
+          "fix_module_loading",
+          "configure_autoload"
+        ],
+        "execution_order": [
+          1,
+          2,
+          3,
+          4
+        ]
+      }
+    ]
+  },
+  "success_patterns": {
+    "error_handling_wrapper": {
+      "description": "为易错脚本添加错误处理包装器",
+      "template": "#!/bin/sh\\nset +e\\n{original_script}\\nif [ $? -ne 0 ]; then\\n    echo 'Script failed, continuing...'\\nfi\\nset -e",
+      "applicable_scripts": [
+        "/etc/init.d/*",
+        "/etc/rc.d/*"
+      ]
+    },
+    "stub_implementation": {
+      "description": "用空实现替代失败的功能",
+      "template": "function {function_name}() {{\\n    echo 'Stub: {function_name}'\\n    return 0\\n}}",
+      "use_cases": [
+        "non-critical services",
+        "hardware-dependent features"
+      ]
+    },
+    "minimal_config": {
+      "description": "生成最小可用配置",
+      "philosophy": "Better to have minimal config than no service",
+      "examples": {
+        "httpd": "ServerRoot /etc/httpd\\nDocumentRoot /var/www\\nListen 8080",
+        "nginx": "worker_processes 1;\\nevents {{ worker_connections 1024; }}\\nhttp {{ server {{ listen 8080; root /var/www; }} }}",
+        "ssh": "Port 2222\\nProtocol 2\\nPermitRootLogin yes"
+      }
+    }
+  },
+  "learning_feedback": {
+    "description": "从每次干预中学习并更新知识库",
+    "record_template": {
+      "timestamp": "ISO 8601 timestamp",
+      "firmware_info": {
+        "vendor": "string",
+        "model": "string",
+        "version": "string",
+        "architecture": "string"
+      },
+      "error_detected": {
+        "pattern": "string",
+        "logs": "array of strings",
+        "context": "object"
+      },
+      "intervention_applied": {
+        "strategy": "string",
+        "steps": "array of objects",
+        "tools_used": "array of strings"
+      },
+      "outcome": {
+        "success": "boolean",
+        "side_effects": "array of strings",
+        "degradation_level": "string"
+      },
+      "learnings": {
+        "what_worked": "string",
+        "what_didnt_work": "string",
+        "suggestions": "array of strings"
+      }
+    },
+    "knowledge_update_rules": {
+      "success": "Increase strategy weight for similar errors",
+      "failure": "Decrease strategy weight, explore alternatives",
+      "partial_success": "Record limitations and constraints",
+      "new_pattern": "Create new entry in pattern library"
+    }
+  }
+}

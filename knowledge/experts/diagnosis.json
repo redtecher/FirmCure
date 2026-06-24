@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "诊断专家知识库",
+  "description": "DiagnosisAgent 故障分类和路由知识",
+
+  "fault_routing": {
+    "description": "故障类型到专家的路由映射",
+    "rules": [
+      {
+        "fault_type": "premature_exit",
+        "triggers": ["SIGSEGV", "SIGABRT", "segfault", "Segmentation fault", "Aborted", "exit code 1"],
+        "expert": "CrashExpert",
+        "severity": "critical"
+      },
+      {
+        "fault_type": "file_missing",
+        "triggers": ["No such file or directory", "ENOENT", "cannot open", "stat failed"],
+        "expert": "FileExpert",
+        "severity": "high"
+      },
+      {
+        "fault_type": "permission_error",
+        "triggers": ["Permission denied", "EACCES", "operation not permitted"],
+        "expert": "FileExpert",
+        "severity": "high"
+      },
+      {
+        "fault_type": "symlink_corruption",
+        "triggers": ["broken link", "Too many levels", "cannot follow symlink"],
+        "expert": "FileExpert",
+        "severity": "medium"
+      },
+      {
+        "fault_type": "network_error",
+        "triggers": ["Connection refused", "Network unreachable", "DNS", "Name resolution", "Temporary failure"],
+        "expert": "NetworkExpert",
+        "severity": "high"
+      },
+      {
+        "fault_type": "port_conflict",
+        "triggers": ["Address already in use", "EADDRINUSE", "bind failed"],
+        "expert": "NetworkExpert",
+        "severity": "medium"
+      },
+      {
+        "fault_type": "file_missing",
+        "triggers": ["HTTP 404", "web_broken=true"],
+        "expert": "FileExpert",
+        "severity": "medium",
+        "note": "端口通但HTTP返回非200，Web内容缺失"
+      },
+      {
+        "fault_type": "premature_exit",
+        "triggers": [
+          "connect: No such file or directory",
+          "Connect to server failed.",
+          "connect cfm failed",
+          "create socket  fail -1",
+          "WeLoveLinux",
+          "init_core_dump"
+        ],
+        "expert": "CrashExpert",
+        "severity": "critical",
+        "vendor": "Tenda",
+        "note": "Tenda httpd 的 ConnectCfm() 连接 CFM Unix socket 失败导致崩溃退出，需要断点绕过。不要误判为 file_missing（虽然出现 No such file or directory，但这是 socket 文件而非普通文件缺失），也不要误判为 dependency_wait（不是等待循环，是直接崩溃）"
+      },
+      {
+        "fault_type": "file_missing",
+        "triggers": ["parser failed", "syntax error", "config error", "configuration file", "variable is empty", "server.port"],
+        "expert": "FileExpert",
+        "severity": "high",
+        "note": "配置文件语法错误（如变量为空、端口缺失）属于文件系统问题，应路由到 FileExpert 修复配置文件，不要归类为 web_error"
+      }
+    ]
+  },
+
+  "classification_hints": {
+    "empty_logs": "如果日志为空且服务未启动，可能是二进制依赖缺失或架构不匹配",
+    "web_broken": "如果 check_service_running 返回 web_broken=true，直接分类为 file_missing",
+    "crash_with_address": "如果日志包含 PC 地址 (如 PC 0042XXXX)，确定为 premature_exit",
+    "multiple_faults": "如果同时有多种故障，按严重程度排序选择最关键的",
+    "tenda_cfm_error": "日志中出现 'connect: No such file or directory' + 'Connect to server failed.' + 'connect cfm failed' 组合时，这是 Tenda httpd 的 ConnectCfm() 调用失败导致崩溃退出，应分类为 premature_exit 并路由到 CrashExpert 进行断点绕过，不要误判为 file_missing 或 dependency_wait",
+    "socket_vs_file": "当 'No such file or directory' 出现在 httpd 启动日志中但 httpd 进程仍然存活时，通常是 Unix socket 连接失败而非文件缺失，应优先考虑 dependency_wait/crash 路径",
+    "config_syntax_error": "当日志出现 'parser failed'、'syntax error'、配置变量为空等时，这是配置文件内容错误（如 UCI config_load 失败导致变量未赋值），属于 file_missing 而非 web_error。应路由到 FileExpert 修复配置文件内容"
+  }
+}

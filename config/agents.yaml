@@ -1,0 +1,193 @@
+"""
+OpenCode Agent Configuration - 配置 agent 团队和技能
+"""
+
+agents:
+  sisyphus:
+    role: orchestrator
+    description: 主调度器 - 协调所有 agent 完成故障诊断和修复
+    skills:
+      - coordination
+      - delegation
+      - verification
+    subagents:
+      - diagnostician
+      - repairer
+      - analyzer
+  
+  diagnostician:
+    role: diagnostician
+    description: 故障诊断专家 - 分析日志、识别故障模式
+    skills:
+      - diagnosis-skill
+      - logging-analysis
+      - pattern-matching
+    tools:
+      - logging-tool
+      - qemu-tool
+      - file-tool
+  
+  repairer:
+    role: repairer
+    description: 修复执行专家 - 根据诊断结果执行修复
+    skills:
+      - intervention-skill
+      - file-operations
+      - network-operations
+    tools:
+      - file-tool
+      - network-tool
+      - qemu-tool
+  
+  analyzer:
+    role: analyzer
+    description: 深度分析专家 - 二进制和动态分析
+    skills:
+      - binary-analysis
+      - dynamic-analysis
+    tools:
+      - radare2-tool
+      - gdb-tool
+
+
+skills:
+  diagnosis-skill:
+    type: workflow
+    description: 故障诊断工作流
+    file: skills/diagnosis-skill.yaml
+    triggers:
+      - vm_failure
+      - service_error
+      - process_crash
+  
+  intervention-skill:
+    type: workflow
+    description: 干预执行工作流
+    file: skills/intervention-skill.yaml
+    triggers:
+      - diagnosis_complete
+  
+  exit-skill:
+    type: diagnostic
+    description: 进程异常退出诊断
+    file: skills/sub-skills/exit-skill.yaml
+  
+  symlink-skill:
+    type: diagnostic
+    description: 符号链接损坏诊断
+    file: skills/sub-skills/symlink-skill.yaml
+  
+  file-missing-skill:
+    type: diagnostic
+    description: 关键文件缺失诊断
+    file: skills/sub-skills/file-missing-skill.yaml
+  
+  permission-skill:
+    type: diagnostic
+    description: 权限错误诊断
+    file: skills/sub-skills/permission-skill.yaml
+  
+  port-conflict-skill:
+    type: diagnostic
+    description: 端口冲突诊断
+    file: skills/sub-skills/port-conflict-skill.yaml
+  
+  dependency-wait-skill:
+    type: diagnostic
+    description: 外部依赖等待诊断
+    file: skills/sub-skills/dependency-wait-skill.yaml
+  
+  network-failure-skill:
+    type: diagnostic
+    description: 网络访问失败诊断
+    file: skills/sub-skills/network-failure-skill.yaml
+  
+  special-case-skill:
+    type: diagnostic
+    description: 特殊情况处理
+    file: skills/sub-skills/special-case-skill.yaml
+
+
+tools:
+  radare2-tool:
+    module: tools.radare2_tool
+    class: Radare2Tool
+    capabilities:
+      - disassemble
+      - get_functions
+      - get_imports
+      - patch_bytes
+  
+  qemu-tool:
+    module: tools.qemu_tool
+    class: QemuTool
+    capabilities:
+      - start_vm
+      - stop_vm
+      - create_snapshot
+      - load_snapshot
+      - execute_qmp
+  
+  logging-tool:
+    module: tools.logging_tool
+    class: LoggingTool
+    capabilities:
+      - read_file
+      - filter_logs
+      - extract_errors
+      - grep_logs
+  
+  file-tool:
+    module: tools.file_tool
+    class: FileTool
+    capabilities:
+      - read_file
+      - write_file
+      - chmod
+      - chown
+      - create_symlink
+  
+  network-tool:
+    module: tools.network_tool
+    class: NetworkTool
+    capabilities:
+      - ping
+      - is_port_open
+      - find_port_conflict
+      - dns_resolve
+  
+  gdb-tool:
+    module: tools.gdb_tool
+    class: GdbTool
+    capabilities:
+      - connect
+      - set_breakpoint
+      - get_backtrace
+      - analyze_crash
+      - read_memory
+
+
+workflows:
+  full_intervention:
+    name: 完整干预流程
+    steps:
+      - agent: sisyphus
+        action: initialize
+      - agent: diagnostician
+        action: diagnose
+      - agent: analyzer
+        action: analyze_dynamic
+        condition: needs_dynamic_analysis
+      - agent: repairer
+        action: repair
+      - agent: sisyphus
+        action: verify
+  
+  diagnosis_only:
+    name: 仅诊断流程
+    steps:
+      - agent: diagnostician
+        action: diagnose
+      - agent: analyzer
+        action: analyze_binary
+        condition: has_binary_path
