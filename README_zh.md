@@ -245,6 +245,20 @@ FirmCure 提供 42+ 专业工具，分为 4 大类：
 
 任何具有可提取 rootfs 和 HTTPD 二进制的固件均支持。
 
+## 持续测试数据集
+
+FirmCure 维护着一个持续更新的固件重托管实验数据集：
+
+**[🔬 redtecher.cn/experiments-data](https://redtecher.cn/experiments-data/)**
+
+该数据集包括：
+- 实时固件分析测试结果
+- 性能指标和成功率统计
+- 详细日志和干预策略
+- 跨厂商兼容性数据
+
+这个数据集提供了 FirmCure 能力的透明度，并作为固件重托管研究的基准测试。
+
 ## 输出目录结构
 
 FirmCure 运行后，所有结果会整理在 `scratch/{case_id}/` 目录中：
