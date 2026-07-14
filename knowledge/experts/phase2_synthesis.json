@@ -1,0 +1,230 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Phase2 SynthesisAgent 启动阶段知识库",
+  "description": "QEMU 启动阶段的 CPU ISA、内核参数、常见故障诊断知识",
+
+  "mips_cpu_isa": {
+    "description": "MIPS CPU ISA 级别与 QEMU -cpu 参数对照表",
+    "detection": "通过 readelf -h 读取 ELF Flags 字段判断",
+    "entries": [
+      {
+        "isa": "MIPS32 Release 1",
+        "flags_mask": "0x00000010",
+        "flags_example": "0x70001000",
+        "qemu_cpu": "4Kc",
+        "note": "最常见的 MIPS32 基础指令集"
+      },
+      {
+        "isa": "MIPS32 Release 2",
+        "flags_mask": "0x10000000",
+        "flags_example": "0x70001005, 0x74001000",
+        "qemu_cpu": "74Kf",
+        "note": "包含 EVA、虚拟化等扩展，大量现代路由器固件使用此 ISA。Kernel Panic 'Illegal instruction' 或 'Unknown opcode' 通常是因为用 4Kc 运行了 MIPS32r2 二进制"
+      },
+      {
+        "isa": "MIPS32 Release 5",
+        "flags_mask": "0x40000000",
+        "flags_example": "",
+        "qemu_cpu": "M14Kc (非微MIPS模式) / I6400",
+        "note": "较少见"
+      },
+      {
+        "isa": "MIPS64 Release 1",
+        "flags_mask": "0x00000020",
+        "flags_example": "",
+        "qemu_cpu": "5Kf",
+        "note": "64位 MIPS"
+      },
+      {
+        "isa": "MIPS64 Release 2",
+        "flags_mask": "0x20000000",
+        "flags_example": "",
+        "qemu_cpu": "5Kf / MIPS64R2-generic",
+        "note": "64位 MIPS R2"
+      },
+      {
+        "isa": "microMIPS",
+        "flags_mask": "0x00000100 (EF_MIPS_MICROMIPS)",
+        "flags_example": "",
+        "qemu_cpu": "M14Kc",
+        "note": "16位压缩指令集，QEMU 对 microMIPS 支持有限"
+      }
+    ],
+    "decision_flow": [
+      "1. 对 rootfs 中 busybox 或 httpd 执行 readelf -h",
+      "2. 提取 Flags 字段的十六进制值",
+      "3. 检查 flags & 0x10000000 (MIPS32r2) → 用 74Kf",
+      "4. 检查 flags & 0x00000010 (MIPS32r1) → 用 4Kc",
+      "5. 如果 Kernel Panic 提示 'Illegal instruction'，大概率是 CPU ISA 不匹配"
+    ]
+  },
+
+  "arm_cpu_isa": {
+    "description": "ARM CPU 与 QEMU machine 对照表",
+    "entries": [
+      {
+        "arch": "ARMv5 (armel)",
+        "qemu_machine": "versatilepb",
+        "qemu_cpu": "arm926",
+        "kernel": "vmlinuz-3.2.0-4-versatile",
+        "root_device": "/dev/sda1"
+      },
+      {
+        "arch": "ARMv7 (armhf)",
+        "qemu_machine": "vexpress-a9",
+        "qemu_cpu": "cortex-a9",
+        "kernel": "vmlinuz-3.2.0-4-vexpress",
+        "root_device": "/dev/mmcblk0p1"
+      },
+      {
+        "arch": "ARMv7 (armhf) beaglebone",
+        "qemu_machine": "virt-2.11",
+        "qemu_cpu": "cortex-a7",
+        "note": "较少见"
+      }
+    ]
+  },
+
+  "kernel_append_params": {
+    "description": "QEMU -append 参数常见配置",
+    "params": {
+      "root": "根文件系统设备，如 /dev/sda1, /dev/sda, /dev/ram0, /dev/mmcblk0p1",
+      "console": "控制台设备：MIPS 用 ttyS0，ARM 用 ttyAMA0",
+      "rootfstype": "文件系统类型：ext4, ext2, ext3, squashfs, jffs2",
+      "init": "init 程序：/bin/sh (最通用), /sbin/init, /linuxrc",
+      "rw": "以读写模式挂载根文件系统",
+      "rootwait": "等待根设备就绪（适用于慢速设备）",
+      "mem": "指定内存大小，如 mem=256M",
+      "ip": "内核阶段网络配置，如 ip=10.10.10.2::10.10.10.1:255.255.255.0"
+    },
+    "common_issues": [
+      {
+        "symptom": "VFS: Cannot open root device",
+        "cause": "root= 参数指向不存在的设备",
+        "fix": "检查磁盘分区情况，尝试 /dev/sda /dev/sda1"
+      },
+      {
+        "symptom": "No init found",
+        "cause": "init= 指定的程序不存在或无法执行",
+        "fix": "改用 init=/bin/sh，确保 /bin/sh 存在且可执行"
+      },
+      {
+        "symptom": "Kernel panic - not syncing: VFS: Unable to mount root fs",
+        "cause": "rootfstype 与实际文件系统不匹配",
+        "fix": "尝试 ext4 → ext2 → ext3"
+      },
+      {
+        "symptom": "Kernel panic - not syncing: Attempted to kill init",
+        "cause": "init 程序启动后立即崩溃（通常缺库）",
+        "fix": "检查 /bin/sh 依赖库是否完整，用 init=/bin/sh 测试"
+      }
+    ]
+  },
+
+  "execution_discipline": {
+    "description": "执行纪律 — 防止过度思考和反复分析",
+    "rules": [
+      "1. 识别出根因后，最多调用2个工具验证，然后立即输出JSON结果",
+      "2. 如果你在思考中发现自己重复分析了同一个问题，立刻停止并输出当前最佳判断",
+      "3. 不完美的修复也比无休止的分析好 — 外层会重新测试并给你新的日志",
+      "4. 库文件ISA不匹配时，不要纠结如何获取完美匹配的库。直接删除不兼容的库，大多数程序不依赖libm",
+      "5. 一次只修一个问题，修完就返回。不要尝试一次性解决所有问题"
+    ]
+  },
+
+  "library_isa_mismatch": {
+    "description": "共享库 ISA 不匹配的处理策略",
+    "scenario": "rootfs 中某个库（如 libm.so.0）的 ISA 与系统其他库/二进制不一致。例如固件是 MIPS32r2，但 lib_base 提供的替换库是 MIPS-I",
+    "strategy": [
+      "1. 用 elf_info 检查库文件的 ISA 级别，确认是否与固件其他二进制一致",
+      "2. 如果不一致，先尝试删除该库（remove），很多程序不依赖 libm/libcrypt 等可选库",
+      "3. 只有当该库是必须的（如 libc.so.0, ld-uClibc.so.0）且 ISA 不匹配时，才需要在 qemu_adjustments 中说明无法修复",
+      "4. 不要反复尝试不同的替换方案，删掉不兼容的库让系统降级运行即可"
+    ],
+    "safe_to_remove": ["libm.so.0", "libpthread.so.0", "libcrypt.so.0", "libdl.so.0"],
+    "must_not_remove": ["libc.so.0", "ld-uClibc.so.0", "libuClibc-*.so"]
+  },
+
+  "boot_failure_patterns": {
+    "description": "常见启动失败模式及诊断方法",
+    "patterns": [
+      {
+        "pattern": "Kernel too old",
+        "type": "kernel_too_old",
+        "diagnosis": "固件的 glibc/uClibc 要求的内核版本高于当前 QEMU 使用的内核版本。需要切换到更高版本的预编译内核",
+        "fix_flow": [
+          "1. 确认当前内核版本（从 boot log 中查找 'Linux version' 行）",
+          "2. 调用 list_precompiled_kernels 工具确认当前架构有哪些可用的预编译内核",
+          "3. 根据工具返回结果选择合适的版本，在 qemu_adjustments 中设置 kernel_version 字段",
+          "4. armhf 使用 v4 内核时，必须同时设置 dtb='vexpress-v2p-ca9.dtb'"
+        ],
+        "available_kernels": {
+          "armhf": {"default": "zImage-2.6.39.4-vexpress (Linux 2.6.39)", "v3": "v3-armhf (Linux 3.x)", "v4": "v4-armhf (Linux 4.x, 需要 dtb=vexpress-v2p-ca9.dtb)"},
+          "armel": {"default": "zImage-2.6.29.6-versatile (Linux 2.6.29)", "v3": "v3-armel (Linux 3.x)", "v4": "v4-armel (Linux 4.x)", "v5": "v5-armel (Linux 5.x)"},
+          "mipsel": {"default": "vmlinux-2.6.32.5-malta-mipsel (Linux 2.6.32)", "v3": "v3-mipsel (Linux 3.x)", "v4": "v4-mipsel (Linux 4.x)", "v5": "v5-mipsel (Linux 5.x)"},
+          "mips": {"default": "vmlinux-3.2.0-4-4kc-malta (Linux 3.2)", "v3": "v3-mipseb (Linux 3.x)", "v4": "v4-mipseb (Linux 4.x)", "v5": "v5-mipseb (Linux 5.x)"}
+        }
+      },
+      {
+        "pattern": "can't load library '(.+)'",
+        "type": "missing_library",
+        "diagnosis": "init 程序（通常是 /bin/sh）依赖的共享库缺失、符号链接悬挂、或 ISA 不兼容",
+        "fix_flow": [
+          "1. list_dir /lib 查看库文件列表",
+          "2. elf_info 检查该库文件的 ISA，与 /bin/sh 或 busybox 对比",
+          "3. 如果 ISA 不匹配：参考 library_isa_mismatch 策略处理",
+          "4. 如果文件缺失：list_lib_base 查看替换库 → remove 删除旧链接 → copy_to_rootfs 复制",
+          "5. 处理完立即输出JSON，不要反复验证"
+        ]
+      },
+      {
+        "pattern": "Kernel panic.*Illegal instruction",
+        "type": "cpu_isa_mismatch",
+        "diagnosis": "固件二进制使用的 ISA 指令超出了当前 QEMU CPU 模型的支持范围",
+        "fix_flow": [
+          "1. check_binary 检查 busybox/libc 的 ELF Flags",
+          "2. 根据 mips_cpu_isa 对照表选择正确的 -cpu 参数",
+          "3. 在输出的 qemu_adjustments 中设置 cpu 字段"
+        ]
+      },
+      {
+        "pattern": "Kernel panic.*not syncing",
+        "type": "kernel_panic",
+        "diagnosis": "内核无法继续运行，需根据具体消息判断原因",
+        "fix_flow": [
+          "1. read_boot_log 读取完整日志找到 panic 前的最后消息",
+          "2. 根据消息匹配 kernel_append_params.common_issues",
+          "3. 在 qemu_adjustments 中调整对应参数"
+        ]
+      },
+      {
+        "pattern": "/bin/sh:.*not found|No such file",
+        "type": "shell_missing",
+        "diagnosis": "/bin/sh 不存在或不是有效的 ELF 二进制",
+        "fix_flow": [
+          "1. rootfs_file_info /bin/sh 检查状态",
+          "2. find_files sh 搜索其他 shell",
+          "3. 如果 /bin/sh 是符号链接，检查目标是否存在"
+        ]
+      }
+    ]
+  },
+
+  "lib_base_usage": {
+    "description": "firmcure/resource/lib_base/ 目录的使用方法",
+    "structure": "lib_base/{arch}/ 包含预编译的基础共享库",
+    "available_archs": ["mipseb", "mipsel", "armel", "armhf"],
+    "common_libs": [
+      "libc.so.0 — uClibc 标准C库",
+      "libm.so.0 — 数学库",
+      "libpthread.so.0 — 线程库",
+      "libdl.so.0 — 动态加载库",
+      "libcrypt.so.0 — 加密库",
+      "libgcc_s.so.1 — GCC 运行时库",
+      "ld-uClibc.so.0 — uClibc 动态链接器",
+      "libssl.so.0.9.8 — OpenSSL",
+      "libcrypto.so.0.9.8 — OpenSSL crypto"
+    ],
+    "usage_note": "当 rootfs 中库文件缺失或符号链接悬挂时，从对应架构目录复制。注意版本号可能不匹配，复制后需要确认动态链接器能找到它。对于悬挂符号链接，先 remove 删除旧链接，再 copy_to_rootfs 复制真实文件。"
+  }
+}

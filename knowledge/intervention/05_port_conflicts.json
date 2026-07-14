@@ -1,0 +1,305 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "端口冲突干预知识库",
+  "description": "包含常见服务默认端口、服务配置文件位置和端口重定向规则",
+  "common_service_ports": {
+    "web_services": {
+      "http": {
+        "default_port": 80,
+        "protocol": "tcp",
+        "alternative_ports": [8080, 8000, 3000, 8888],
+        "common_binaries": ["/usr/sbin/httpd", "/usr/sbin/uhttpd", "/usr/sbin/lighttpd"],
+        "config_files": [
+          "/etc/httpd.conf",
+          "/etc/uhttpd.conf",
+          "/etc/lighttpd/lighttpd.conf"
+        ]
+      },
+      "https": {
+        "default_port": 443,
+        "protocol": "tcp",
+        "alternative_ports": [8443, 4433],
+        "config_files": [
+          "/etc/httpd.conf",
+          "/etc/nginx.conf"
+        ]
+      }
+    },
+    "remote_access": {
+      "ssh": {
+        "default_port": 22,
+        "protocol": "tcp",
+        "alternative_ports": [2222, 2022, 2200],
+        "binary": "/usr/sbin/dropbear",
+        "config_files": ["/etc/dropbear/dropbear_config", "/etc/ssh/sshd_config"]
+      },
+      "telnet": {
+        "default_port": 23,
+        "protocol": "tcp",
+        "alternative_ports": [2323, 2023],
+        "binary": "/usr/sbin/telnetd"
+      },
+      "ftp": {
+        "default_port": 21,
+        "protocol": "tcp",
+        "alternative_ports": [2121, 2021],
+        "binary": "/usr/sbin/vsftpd"
+      }
+    },
+    "file_sharing": {
+      "samba": {
+        "default_port": 445,
+        "protocol": "tcp",
+        "alternative_ports": [1445],
+        "config": "/etc/samba/smb.conf"
+      },
+      "nfs": {
+        "default_port": 2049,
+        "protocol": "tcp",
+        "alternative_ports": [3049]
+      }
+    },
+    "network_utilities": {
+      "ntp": {
+        "default_port": 123,
+        "protocol": "udp",
+        "alternative_ports": [1123],
+        "binary": "/usr/sbin/ntpd"
+      },
+      "snmp": {
+        "default_port": 161,
+        "protocol": "udp",
+        "alternative_ports": [1161],
+        "config": "/etc/snmp/snmpd.conf"
+      },
+      "syslog": {
+        "default_port": 514,
+        "protocol": "udp",
+        "alternative_ports": [1514]
+      }
+    },
+    "database": {
+      "mysql": {
+        "default_port": 3306,
+        "protocol": "tcp",
+        "alternative_ports": [3307, 13306],
+        "binary": "/usr/sbin/mysqld"
+      },
+      "postgresql": {
+        "default_port": 5432,
+        "protocol": "tcp",
+        "alternative_ports": [5433]
+      }
+    }
+  },
+  "service_config_locations": {
+    "apache_httpd": {
+      "binary": ["/usr/sbin/httpd", "/usr/sbin/apache2"],
+      "main_config": [
+        "/etc/httpd.conf",
+        "/etc/apache2/apache2.conf",
+        "/etc/httpd/httpd.conf"
+      ],
+      "vhost_dir": [
+        "/etc/httpd/conf.d/",
+        "/etc/apache2/sites-enabled/"
+      ],
+      "listen_directive": "Listen",
+      "listen_format": "Listen {port}",
+      "modifying": {
+        "sed_command": "sed -i 's/Listen {old_port}/Listen {new_port}/' {config_file}"
+      }
+    },
+    "nginx": {
+      "binary": "/usr/sbin/nginx",
+      "main_config": "/etc/nginx/nginx.conf",
+      "conf_d_dir": "/etc/nginx/conf.d/",
+      "listen_directive": "listen",
+      "listen_format": "listen {port};",
+      "modifying": {
+        "sed_command": "sed -i 's/listen {old_port}/listen {new_port}/' {config_file}"
+      }
+    },
+    "lighttpd": {
+      "binary": "/usr/sbin/lighttpd",
+      "main_config": "/etc/lighttpd/lighttpd.conf",
+      "listen_directive": "server.port",
+      "listen_format": "server.port = {port}",
+      "modifying": {
+        "sed_command": "sed -i 's/server\\.port = {old_port}/server.port = {new_port}/' {config_file}"
+      }
+    },
+    "uhttpd": {
+      "binary": "/usr/sbin/uhttpd",
+      "main_config": "/etc/config/uhttpd",
+      "listen_directive": "list httpd",
+      "listen_format": "option listen_http {port}",
+      "modifying": {
+        "uci_command": "uci set uhttpd.httpd.listen_http={port} && uci commit"
+      }
+    },
+    "dropbear": {
+      "binary": "/usr/sbin/dropbear",
+      "config": "/etc/dropbear/dropbear_config",
+      "port_option": "-p",
+      "startup_script": "/etc/init.d/dropbear",
+      "modifying": {
+        "command": "sed -i 's/DROPBEAR_PORT={old_port}/DROPBEAR_PORT={new_port}/' /etc/init.d/dropbear"
+      }
+    },
+    "telnetd": {
+      "binary": "/usr/sbin/telnetd",
+      "config": "/etc/inetd.conf",
+      "port_field": "telnet stream tcp nowait root.telnetd"
+    }
+  },
+  "port_conflict_resolution": {
+    "strategy_terminate_occupier": {
+      "description": "终止占用端口的进程",
+      "when": "占用者是僵尸进程、旧实例或无关进程",
+      "steps": [
+        "netstat -tlnp | grep :{port}",
+        "提取PID",
+        "kill -9 {pid}",
+        "验证端口已释放"
+      ],
+      "commands": {
+        "identify": "netstat -tlnp | grep :{port}",
+        "terminate": "kill -9 {pid}",
+        "verify": "netstat -tlnp | grep :{port}"
+      },
+      "risk": "low"
+    },
+    "strategy_change_service_port": {
+      "description": "修改服务配置使用新端口",
+      "when": "端口被系统关键服务占用",
+      "steps": [
+        "定位服务配置文件",
+        "修改端口配置",
+        "重启服务",
+        "更新健康检查地址"
+      ],
+      "commands": {
+        "locate_config": "grep -r 'Listen\\|listen\\|server.port' /etc/",
+        "modify_config": "sed -i 's/{old_port}/{new_port}/g' {config}",
+        "restart_service": "/etc/init.d/{service} restart",
+        "verify": "netstat -tlnp | grep {new_port}"
+      },
+      "risk": "medium"
+    },
+    "strategy_port_redirection": {
+      "description": "使用iptables进行端口重定向",
+      "when": "无法修改配置或需要透明重定向",
+      "steps": [
+        "添加iptables NAT规则",
+        "验证重定向",
+        "记录规则以便清理"
+      ],
+      "commands": {
+        "add_rule": "iptables -t nat -A PREROUTING -p tcp --dport {old_port} -j REDIRECT --to-port {new_port}",
+        "verify": "iptables -t nat -L PREROUTING -n -v",
+        "cleanup": "iptables -t nat -D PREROUTING -p tcp --dport {old_port} -j REDIRECT --to-port {new_port}"
+      },
+      "risk": "low"
+    },
+    "strategy_bind_to_specific_interface": {
+      "description": "绑定到特定接口而非所有接口",
+      "when": "端口冲突仅发生在特定接口",
+      "steps": [
+        "识别网络接口",
+        "修改配置绑定到特定IP"
+      ],
+      "example": "Listen 192.168.1.1:80 代替 Listen 80",
+      "risk": "low"
+    }
+  },
+  "process_identification": {
+    "netstat_analysis": {
+      "command": "netstat -tlnp | grep :{port}",
+      "output_format": "proto  recv  local_address  foreign_address  state  PID/program",
+      "parse": {
+        "local_address": "提取绑定地址和端口",
+        "state": "LISTEN表示监听状态",
+        "pid_program": "PID和进程名"
+      }
+    },
+    "lsof_analysis": {
+      "command": "lsof -i :{port}",
+      "output_format": "COMMAND  PID  USER  FD  TYPE  DEVICE  SIZE/OFF  NODE  NAME",
+      "parse": {
+        "command": "进程名",
+        "pid": "进程ID",
+        "user": "运行用户"
+      }
+    },
+    "ss_analysis": {
+      "command": "ss -tlnp | grep :{port}",
+      "description": "现代替代netstat的工具",
+      "output_format": "State  Recv-Q  Send-Q  Local Address:Port  Peer Address:Port",
+      "parse": "类似netstat"
+    }
+  },
+  "health_check_update": {
+    "description": "修改健康检查端口后需要更新相关配置",
+    "locations": [
+      {
+        "component": "监控系统",
+        "config": "/etc/monitor/healthcheck.conf",
+        "fields": ["target_port", "url"]
+      },
+      {
+        "component": "负载均衡器",
+        "config": "/etc/haproxy/haproxy.cfg",
+        "fields": ["server", "port"]
+      },
+      {
+        "component": "服务发现",
+        "config": "/etc/consul/config.json",
+        "fields": ["service_port"]
+      }
+    ]
+  },
+  "intervention_cases": [
+    {
+      "case_id": "port_001",
+      "firmware": "TP-Link WR841N",
+      "target_service": "httpd",
+      "target_port": 80,
+      "occupier": "旧httpd进程 (PID 1234)",
+      "strategy": "terminate_occupier",
+      "outcome": "success",
+      "commands": [
+        "netstat -tlnp | grep :80",
+        "kill -9 1234",
+        "netstat -tlnp | grep :80 (验证已释放)"
+      ]
+    },
+    {
+      "case_id": "port_002",
+      "firmware": "Netgear R6220",
+      "target_service": "nginx",
+      "target_port": 80,
+      "occupier": "系统服务（无法终止）",
+      "strategy": "change_service_port",
+      "outcome": "success",
+      "commands": [
+        "sed -i 's/listen 80/listen 8080/' /etc/nginx/nginx.conf",
+        "nginx -s reload",
+        "iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 8080"
+      ]
+    },
+    {
+      "case_id": "port_003",
+      "firmware": "D-Link DIR-882",
+      "target_service": "dropbear",
+      "target_port": 22,
+      "occupier": "僵尸SSH进程",
+      "strategy": "terminate_occupier",
+      "outcome": "success",
+      "commands": [
+        "killall dropbear",
+        "/etc/init.d/dropbear start"
+      ]
+    }
+  ]
+}

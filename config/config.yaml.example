@@ -1,0 +1,5 @@
+# FirmCure 配置文件示例
+
+# sudo 密码（用于 QEMU、网络配置、磁盘操作等需要 root 权限的步骤）
+# 也可以通过环境变量 SUDO_PASSWORD 设置，此文件优先级更高
+sudo_password: "your-sudo-password-here"

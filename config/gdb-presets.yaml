@@ -1,0 +1,27 @@
+gdb_presets:
+  crash_breakpoints:
+    - __stack_chk_fail
+    - __fortify_fail
+    - abort
+    - exit
+  
+  syscall_breakpoints:
+    - sys_read
+    - sys_write
+    - sys_connect
+    - sys_poll
+    - sys_open
+  
+  architecture_configs:
+    x86_64:
+      qemu_args: "-s -S"
+      gdb_cmd: "target remote localhost:1234"
+      register_set: rip rbp rsp rip2 rsp eflags eflags
+    arm:
+      qemu_args: "-s -S -gdb tcp::1234"
+      gdb_cmd: "target remote localhost:1234"
+      register_set: r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 sp pc lr"
+    riscv:
+      qemu_args: "-s -S"
+      gdb_cmd: "target remote localhost:1234"
+      register_set: pc ra0 ra1 ra2 ra3 ra4 ra5 ra6 ra7 ra8 ra9 ra10 ra11 ra12 sp

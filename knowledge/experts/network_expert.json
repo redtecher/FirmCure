@@ -1,0 +1,111 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "网络修复专家知识库",
+  "description": "NetworkExpert DNS、端口冲突、网络连接修复知识",
+  "httpd_start_method": "所有 httpd 启动测试统一使用 ./httpd_start.sh，不要手动拼接 httpd 命令。修复网络问题后用 vm_exec('./httpd_start.sh') 验证。",
+
+  "network_error": {
+    "dns_failure": {
+      "symptoms": ["Name resolution failed", "DNS", "Temporary failure in name resolution", "Unknown host"],
+      "fix": "vm_add_hosts_entry 添加 DNS 映射到 /etc/hosts",
+      "common_entries": [
+        {"hostname": "localhost", "ip": "127.0.0.1"},
+        {"hostname": "router", "ip": "10.10.10.2"}
+      ]
+    },
+    "connection_refused": {
+      "symptoms": ["Connection refused", "Network unreachable"],
+      "fix": "检查目标服务是否启动，检查防火墙规则"
+    }
+  },
+
+  "port_conflict": {
+    "detection": {
+      "command": "netstat -tlnp | grep :<port>",
+      "tool": "vm_exec"
+    },
+    "resolution": [
+      {
+        "strategy": "终止占用进程",
+        "tool": "vm_kill_process",
+        "when": "占用进程不是 HTTPD 本身"
+      },
+      {
+        "strategy": "修改服务端口",
+        "when": "无法终止占用进程",
+        "action": "修改 httpd 配置文件中的端口设置"
+      }
+    ],
+    "common_service_ports": {
+      "80": "HTTP",
+      "443": "HTTPS",
+      "8080": "HTTP备用",
+      "8182": "lighttpd-mydlink"
+    }
+  },
+
+  "firmware_network_setup": {
+    "description": "常见固件网络配置需求",
+    "common_commands": [
+      "ifconfig lo 127.0.0.1 up",
+      "ifconfig eth0 10.10.10.2 netmask 255.255.255.0 up",
+      "route add default gw 10.10.10.1"
+    ]
+  },
+
+  "vendor_specific": {
+    "tenda": {
+      "description": "Tenda 路由器特有网络配置问题",
+      "br0_bridge_issue": {
+        "symptoms": [
+          "程序读取 br0 网卡 IP 地址",
+          "httpd 启动时查找 br0 接口",
+          "网络初始化失败，提示找不到 br0",
+          "日志输出监听地址为 255.255.255.255（广播地址）",
+          "httpd 启动后显示 'listening on 255.255.255.255:80'"
+        ],
+        "root_cause": "Tenda 固件的 httpd 程序会从 br0 网桥接口获取 IP 地址，VM 环境中默认不存在 br0。当无法获取 br0 IP 时，程序会回退到使用 255.255.255.255（广播地址）作为监听地址，导致服务无法正常响应请求",
+        "fix_steps": [
+          {
+            "step": 1,
+            "description": "创建 br0 网桥",
+            "command": "brctl addbr br0",
+            "tool": "vm_exec",
+            "note": "需要 bridge-utils 包支持"
+          },
+          {
+            "step": 2,
+            "description": "配置 br0 IP 地址",
+            "command": "ifconfig br0 192.168.0.1 netmask 255.255.255.0 up",
+            "tool": "vm_exec",
+            "note": "IP 地址根据固件默认配置调整，常见为 192.168.0.1 或 192.168.1.1"
+          },
+          {
+            "step": 3,
+            "description": "验证 br0 创建成功",
+            "command": "ifconfig br0",
+            "tool": "vm_exec"
+          }
+        ],
+        "alternative_fix": {
+          "description": "如果 VM 内没有 brctl 工具",
+          "method": "使用 ip 命令创建网桥",
+          "commands": [
+            "ip link add name br0 type bridge",
+            "ip addr add 192.168.0.1/24 dev br0",
+            "ip link set br0 up"
+          ]
+        },
+        "detection": {
+          "log_patterns": [
+            "br0",
+            "bridge",
+            "get_if_addr.*br0",
+            "ioctl.*SIOCGIFADDR.*br0"
+          ],
+          "binary_analysis": "使用 list_strings 搜索 'br0' 字符串确认程序依赖（先 open_file + analyze）"
+        }
+      }
+    }
+  }
+}

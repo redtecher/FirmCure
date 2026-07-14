@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "验证专家知识库",
+  "description": "VerificationAgent 服务验证知识",
+
+  "workflow": {
+    "description": "严格两步验证流程，不要做其他任何事",
+    "step_1": {
+      "name": "启动服务",
+      "tool": "vm_exec",
+      "command": "./httpd_start.sh",
+      "timeout": 10,
+      "note": "如果之前已启动过，跳过此步直接检测。启动失败也不调查原因，直接进入第二步"
+    },
+    "step_2": {
+      "name": "检测服务状态",
+      "tool": "check_service_running",
+      "success_criteria": {
+        "running": "curl_ok=true 且 port_reachable=true",
+        "web_broken": "curl_ok=false 但 port_reachable=true（需要 FileExpert 修复）",
+        "stopped": "port_reachable=false（服务未启动或启动失败）"
+      }
+    }
+  },
+
+  "forbidden_actions": [
+    "不要使用逆向分析工具 (open_file, analyze, list_strings, disassemble 等)",
+    "不要使用 gdb_* 工具",
+    "不要查配置文件内容",
+    "不要修改任何文件",
+    "不要重启网络",
+    "不要做诊断分析",
+    "只启动服务然后检测"
+  ]
+}

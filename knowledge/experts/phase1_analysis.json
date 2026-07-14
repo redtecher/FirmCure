@@ -1,0 +1,302 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Phase1 固件分析知识库",
+  "description": "Phase1Agent 分析固件 rootfs 时使用的专家知识",
+
+  "multi_config_warning": {
+    "description": "多配置文件问题 — 很多固件有多个 HTTPD 配置文件，必须选择正确的配置",
+    "problem_case": {
+      "firmware": "D-Link DSP-W215",
+      "configs": [
+        {"file": "lighttpd.conf", "port": 80, "web_root": "/www"},
+        {"file": "lighttpd-mydlink.conf", "port": 8182, "web_root": "/www/mydlink"}
+      ],
+      "issue": "如果选择了 mydlink.conf (web_root=/www/mydlink)，但 www.tgz 解压到 /www，则访问 /www/mydlink 会为空",
+      "correct_choice": "选择 lighttpd.conf (port 80, web_root=/www) 或确保内容放入 /www/mydlink"
+    },
+    "detection_steps": [
+      "1. 列出所有 HTTPD 配置文件: file_list_dir /etc/lighttpd/ 和 /mnt/lighttpd/",
+      "2. 读取每个配置文件的 server.port 和 server_root/document-root",
+      "3. 检查归档文件解压后的目标目录",
+      "4. 确保配置文件的 web_root 与解压目标一致"
+    ],
+    "selection_rule": "选择 web_root 与归档解压目录匹配的配置文件"
+  },
+
+  "httpd_types": {
+    "lighttpd": {
+      "binary_names": ["lighttpd"],
+      "config_locations": ["/etc/lighttpd/", "/mnt/lighttpd/"],
+      "common_ports": [80, 443, 8080, 8182, 8183],
+      "start_command": "lighttpd -f <config_file>",
+      "multi_config_handling": {
+        "description": "lighttpd 常有多个配置文件，需要分析所有配置并选择正确的",
+        "config_parsing": [
+          "grep 'server.port' <config_file> - 获取端口",
+          "grep 'server_root' <config_file> - 获取 Web 根目录变量",
+          "grep 'document-root' <config_file> - 获取实际根目录"
+        ],
+        "common_patterns": [
+          {"config_name": "lighttpd.conf", "typical_port": 80, "typical_root": "/www"},
+          {"config_name": "lighttpd-mydlink.conf", "typical_port": 8182, "typical_root": "/www/mydlink"},
+          {"config_name": "lighttpd-ssl.conf", "typical_port": 443, "typical_root": "/www", "ssl": true}
+        ]
+      }
+    },
+    "goahead": {
+      "binary_names": ["goahead", "GoAhead"],
+      "config_locations": ["/etc/goahead.conf", "/var/etc/goahead.conf"],
+      "common_ports": [80],
+      "start_command": "goahead"
+    },
+    "boa": {
+      "binary_names": ["boa"],
+      "config_locations": ["/etc/boa/boa.conf", "/etc/boa.conf"],
+      "common_ports": [80],
+      "start_command": "boa -c /etc/boa -f /etc/boa/boa.conf"
+    },
+    "custom_httpd": {
+      "binary_names": ["httpd"],
+      "config_locations": ["/var/etc/httpd.cfg", "/etc/httpd.conf"],
+      "common_ports": [80],
+      "start_command": "httpd -f <config_file>"
+    },
+    "busybox_httpd": {
+      "binary_names": ["busybox"],
+      "config_locations": [],
+      "common_ports": [80],
+      "start_command": "busybox httpd -p 80 -h /www"
+    }
+  },
+
+  "config_file_format_rules": {
+    "description": "配置文件写入格式规范 - 必须使用 heredoc 避免转义问题",
+    "correct_format": "cat > /etc/jhttpd.conf << 'ENDCONF'\nsrv_port=80\ndoc_root=/www\nsrv_mode=RUN_HTTP\nENDCONF",
+    "wrong_format": "echo 'srv_port=80' > /etc/jhttpd.conf (多行配置不要用 echo)",
+    "rules": [
+      "多行配置文件必须用 heredoc (cat > file << 'EOF' ... EOF)",
+      "heredoc 结束符用单引号包裹 ('ENDCONF') 避免变量展开",
+      "不要用 echo 逐行写入，容易出错且难以维护",
+      "不要用 printf，在 BusyBox 环境中行为不一致"
+    ],
+    "examples": {
+      "jhttpd_conf": "cat > /etc/jhttpd.conf << 'ENDCONF'\nsrv_port=80\ndoc_root=/www\nsrv_mode=RUN_HTTP\nENDCONF",
+      "lighttpd_conf": "cat > /etc/lighttpd/lighttpd.conf << 'ENDCONF'\nserver.document-root = \"/www\"\nserver.port = 80\nENDCONF",
+      "httpd_cfg": "cat > /var/etc/httpd.cfg << 'ENDCONF'\nPort 80\nDocumentRoot /www\nENDCONF",
+      "boa_conf": "cat > /etc/boa/boa.conf << 'ENDCONF'\nPort 80\nDocumentRoot /www\nKeepAliveMax 1000\nENDCONF"
+    }
+  },
+
+  "runtime_content_patterns": {
+    "description": "运行时内容生成模式 — 很多固件的 Web 内容不在 rootfs 中预置，而是启动时动态生成",
+    "key_principle": "归档解压目标目录必须与 HTTPD 配置的 web_root 一致！",
+    "patterns": [
+      {
+        "name": "归档解压模式",
+        "detection": [
+          "搜索 rootfs 中 .tgz/.tar.gz/.tar.bz2/.zip 文件",
+          "检查归档文件内部结构 (tar -tzf)",
+          "检查 Web 根目录是否为空",
+          "用 list_strings 分析 rcS 中启动的后台二进制（先 open_file + analyze(level=2)）"
+        ],
+        "keywords_in_binary": ["tar -zxf", "tar -xzf", "gunzip", "unzip", "extract"],
+        "archive_locations": ["/mnt/", "/etc/", "/var/", "/usr/share/"],
+        "example": {
+          "firmware": "D-Link DSP-W215",
+          "archive": "/mnt/www.tgz",
+          "archive_contents": ["www/", "www/xml/", "www/js/", "www/ap/", "www/rpt/", "www/mydlink/"],
+          "extraction_target": "tar -zxf /etc/www.tgz -C / (解压到根目录，文件进入 /www/)",
+          "httpd_configs": [
+            {"file": "lighttpd.conf", "port": 80, "web_root": "/www", "matches_archive": true},
+            {"file": "lighttpd-mydlink.conf", "port": 8182, "web_root": "/www/mydlink", "matches_archive": false}
+          ],
+          "correct_choice": "使用 lighttpd.conf (port 80) 因为 web_root=/www 匹配解压目录",
+          "operations": [
+            "cp -a /mnt/* /etc",
+            "tar -zxf /etc/www.tgz -C /",
+            "mv /www/ap/* /www; rm -rf /www/ap",
+            "mv /www/rpt/* /www; rm -rf /www/rpt",
+            "ln -sf /usr/bin/my_cgi.cgi /www/my_cgi.cgi"
+          ]
+        }
+      },
+      {
+        "name": "配置动态生成模式",
+        "detection": [
+          "检查 /etc/templates/ 目录是否存在",
+          "用 list_strings 搜索 rgdb, template, PHP 相关字符串（先 open_file + analyze）"
+        ],
+        "keywords_in_binary": ["rgdb", "template", ".php", "render", "generate"],
+        "example": {
+          "firmware": "D-Link DAP-1522",
+          "binary": "rgdb",
+          "operations": [
+            "rgdb 从 /etc/templates/httpd/ 中的 .php 模板生成 httpd 配置",
+            "生成的配置文件通常在 /var/etc/ 目录下"
+          ]
+        }
+      },
+      {
+        "name": "后台守护进程启动模式",
+        "detection": [
+          "rcS 中 `xxx &` 格式的后台启动",
+          "/etc/profile 中的 swapdev/startbsp/insmod 等设备初始化",
+          "守护进程通常执行完整启动序列：解压 → 创建目录 → 符号链接 → 生成配置 → 启动 httpd"
+        ],
+        "common_binaries": ["system_manager", "firmware_manager", "watchdog", "csteereset", "dsd"],
+        "keywords_in_binary": [
+          "mkdir", "ln", "cp", "mv", "rm",
+          "httpd", "lighttpd", "boa", "goahead", "nginx",
+          "/www", "/web", "/etc/config", "/var/etc",
+          "tar", "gunzip", "unzip"
+        ],
+        "analysis_method": [
+          "1. 从 rcS 找到所有 `xxx &` 后台二进制",
+          "2. 对每个用 list_strings 提取字符串（先 open_file + analyze）",
+          "3. 搜索关键词：tar/ln/cp/mv/mkdir + httpd/lighttpd/boa + 路径",
+          "4. 将发现的操作序列转化为 startup_script_content 中的 shell 命令"
+        ],
+        "dsd_daemon": {
+          "description": "dsd (device service daemon) — IPC摄像头固件的关键守护进程",
+          "priority": "high",
+          "startup_sequence": "S30dsd (在 S50uhttpd 之前启动)",
+          "dependencies": "依赖 S10ubus (ubusd 必须先启动)",
+          "functions": [
+            "管理 IPC 摄像头设备服务",
+            "可触发 luci-reload uhttpd 重载 Web 服务",
+            "初始化设备配置和运行时环境"
+          ],
+          "detection": [
+            "检查 /etc/init.d/S30dsd 或 /etc/rc.d/S30dsd",
+            "检查 rcS 中是否有 dsd & 或 /usr/bin/dsd & 启动",
+            "用 list_strings 搜索 dsd 二进制中的关键字：uhttpd, luci-reload, device"
+          ],
+          "startup_command": "dsd & 或 /usr/bin/dsd & (必须后台启动)",
+          "startup_script_integration": {
+            "rule": "如果在 init.d 或 rcS 中检测到 dsd，必须在 startup.sh 中启动",
+            "position": "在 ubusd 之后，httpd 之前",
+            "format": "# Start device service daemon\n/usr/bin/dsd &\nsleep 1"
+          },
+          "example": {
+            "firmware": "TP-Link IPC (TL-IPC43AN)",
+            "startup_sequence": [
+              "/sbin/ubusd &",
+              "sleep 1",
+              "/usr/bin/dsd &",
+              "sleep 1",
+              "/usr/sbin/uhttpd -f -h /www -p 0.0.0.0:80"
+            ],
+            "issue_if_missing": "设备服务未初始化，可能导致 uhttpd 功能异常"
+          }
+        }
+      }
+    ]
+  },
+
+  "startup_script_locations": {
+    "description": "常见启动脚本位置，必须逐一检查",
+    "locations": [
+      {
+        "path": "/etc/init.d/rcS",
+        "description": "最常见的主启动脚本",
+        "priority": 1
+      },
+      {
+        "path": "/etc/profile",
+        "description": "Shell登录时执行，部分固件（如HG532e）将设备初始化放在这里（swapdev/startbsp/insmod等）",
+        "priority": 2
+      },
+      {
+        "path": "/etc/inittab",
+        "description": "init进程配置，::sysinit:行指向启动脚本",
+        "priority": 2
+      },
+      {
+        "path": "/etc/init.d/",
+        "description": "init.d目录下的所有脚本",
+        "priority": 3,
+        "critical_rule": "必须读取 init.d 中与 HTTPD 同名的脚本（如 /etc/init.d/lighttpd、/etc/init.d/httpd、/etc/init.d/boa），这些脚本通常包含启动前的关键准备工作（cp 配置、mkdir、动态生成配置追加规则等）。httpd_command 必须从该脚本的 start() 函数中提取完整启动逻辑，而非仅凭猜测拼接。如果 start() 中除了启动命令还有前置操作（cp、mkdir、uci get 等），这些前置操作应写入 startup_script_content，httpd_command 只保留最后的启动命令本身。"
+      },
+      {
+        "path": "/etc/scripts/system.sh",
+        "description": "Realtek等厂商的系统初始化脚本",
+        "priority": 3
+      },
+      {
+        "path": "/etc/rc.d/",
+        "description": "某些固件使用rc.d目录",
+        "priority": 4
+      }
+    ],
+    "important_note": "rcS内容简单时，必须检查/etc/profile！很多固件的rcS仅输出标记，实际初始化在profile中。profile中常见的初始化包括：swapdev, startbsp, insmod驱动加载, 网络配置, 守护进程启动等。"
+  },
+
+  "startup_script_template": {
+    "description": "startup_script_content 模板，必须包含运行时内容生成步骤",
+    "requirements": [
+      "不使用 chroot",
+      "使用虚拟机内绝对路径",
+      "不启动 HTTPD（httpd 在 httpd_start.sh 中启动）",
+      "不配置网络"
+    ],
+    "base_steps": [
+      "mkdir -p /var/run /var/log /var/etc /tmp",
+      "[ -e /dev/null ] || mknod /dev/null c 1 3",
+      "[ -e /dev/zero ] || mknod /dev/zero c 1 5",
+      "[ -e /dev/random ] || mknod /dev/random c 1 8",
+      "[ -e /dev/console ] || mknod /dev/console c 5 1",
+      "mount -t proc proc /proc 2>/dev/null || true",
+      "mount -t sysfs sysfs /sys 2>/dev/null || true",
+      "mount -t tmpfs tmpfs /tmp 2>/dev/null || true"
+    ],
+    "runtime_content_steps": [
+      "cp -a /mnt/* /etc 2>/dev/null || true",
+      "tar -zxf /etc/www.tgz -C / 2>/dev/null || true",
+      "ln -sf /usr/bin/cgi /www/cgi-bin/cgi 2>/dev/null || true"
+    ]
+  },
+
+  "nvram_detection": {
+    "description": "NVRAM/apmib 依赖检测 — 很多嵌入式路由器固件依赖 NVRAM 存储配置",
+    "important_note": "httpd_command 保持原始命令，不要添加 LD_PRELOAD！Phase2 会自动注入 libnvram.so",
+    "nvram_functions": [
+      "apmib_init",
+      "apmib_get",
+      "apmib_set",
+      "apmib_reinit",
+      "nvram_get",
+      "nvram_set",
+      "nvram_commit",
+      "nvram_init"
+    ],
+    "nvram_libraries": [
+      "libapmib.so (固件自带，需要硬件NVRAM)",
+      "libnvram.so (Phase2注入，模拟NVRAM)"
+    ],
+    "detection_method": [
+      "1. 用 list_imports 分析 HTTPD 二进制的导入函数（先 open_file + analyze）",
+      "2. 用 list_strings 搜索 'apmib' 或 'nvram' 相关字符串",
+      "3. 检查 dependencies/shared_libraries 中是否有 libapmib.so"
+    ],
+    "output_format": {
+      "nvram_needed": "true/false",
+      "nvram_arch": "mipseb | mipsel | armel | armhf",
+      "httpd_command": "原始命令，不添加 LD_PRELOAD"
+    },
+    "arch_mapping": {
+      "mips + big endian": "mipseb",
+      "mips + little endian": "mipsel",
+      "arm/armel": "armel",
+      "armhf": "armhf"
+    },
+    "example": {
+      "firmware": "D-Link DSP-W215",
+      "imports": ["apmib_init", "apmib_get", "apmib_set"],
+      "shared_libraries": ["libapmib.so"],
+      "nvram_needed": true,
+      "architecture": "mipsel",
+      "nvram_arch": "mipsel",
+      "httpd_command": "boa -c /etc/boa (原始命令，无LD_PRELOAD)"
+    }
+  }
+}

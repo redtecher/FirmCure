@@ -1,0 +1,252 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "符号链接修复知识库",
+  "description": "包含设备节点映射、常见符号链接模式和库文件链接规则",
+  "device_node_mappings": {
+    "standard_devices": {
+      "/dev/null": {
+        "type": "char",
+        "major": 1,
+        "minor": 3,
+        "mode": "0666",
+        "description": "空设备",
+        "creation_command": "mknod -m 666 /dev/null c 1 3"
+      },
+      "/dev/zero": {
+        "type": "char",
+        "major": 1,
+        "minor": 5,
+        "mode": "0666",
+        "description": "零设备",
+        "creation_command": "mknod -m 666 /dev/zero c 1 5"
+      },
+      "/dev/console": {
+        "type": "char",
+        "major": 5,
+        "minor": 1,
+        "mode": "0620",
+        "description": "系统控制台",
+        "creation_command": "mknod -m 620 /dev/console c 5 1"
+      },
+      "/dev/tty": {
+        "type": "char",
+        "major": 5,
+        "minor": 0,
+        "mode": "0666",
+        "description": "控制终端",
+        "creation_command": "mknod -m 666 /dev/tty c 5 0"
+      },
+      "/dev/random": {
+        "type": "char",
+        "major": 1,
+        "minor": 8,
+        "mode": "0666",
+        "description": "随机数生成器",
+        "creation_command": "mknod -m 666 /dev/random c 1 8"
+      },
+      "/dev/urandom": {
+        "type": "char",
+        "major": 1,
+        "minor": 9,
+        "mode": "0666",
+        "description": "非阻塞随机数生成器",
+        "creation_command": "mknod -m 666 /dev/urandom c 1 9"
+      },
+      "/dev/full": {
+        "type": "char",
+        "major": 1,
+        "minor": 7,
+        "mode": "0666",
+        "description": "总是满的设备",
+        "creation_command": "mknod -m 666 /dev/full c 1 7"
+      }
+    },
+    "tty_devices": {
+      "/dev/ttyS0": {
+        "type": "char",
+        "major": 4,
+        "minor": 64,
+        "mode": "0660",
+        "description": "串口0"
+      },
+      "/dev/ttyS1": {
+        "type": "char",
+        "major": 4,
+        "minor": 65,
+        "mode": "0660",
+        "description": "串口1"
+      },
+      "/dev/ttyUSB0": {
+        "type": "char",
+        "major": 188,
+        "minor": 0,
+        "mode": "0660",
+        "description": "USB串口0"
+      }
+    },
+    "block_devices": {
+      "/dev/mtdblock0": {
+        "type": "block",
+        "major": 31,
+        "minor": 0,
+        "mode": "0600",
+        "description": "MTD块设备0"
+      },
+      "/dev/mtdblock1": {
+        "type": "block",
+        "major": 31,
+        "minor": 1,
+        "mode": "0600",
+        "description": "MTD块设备1"
+      }
+    }
+  },
+  "common_symlink_patterns": {
+    "stdin_stdout_stderr": {
+      "/dev/stdin": {
+        "target": "/proc/self/fd/0",
+        "description": "标准输入"
+      },
+      "/dev/stdout": {
+        "target": "/proc/self/fd/1",
+        "description": "标准输出"
+      },
+      "/dev/stderr": {
+        "target": "/proc/self/fd/2",
+        "description": "标准错误"
+      }
+    },
+    "busybox_links": {
+      "/bin/sh": {
+        "target": "/bin/busybox",
+        "description": "Shell指向busybox"
+      },
+      "/bin/ls": {
+        "target": "/bin/busybox",
+        "description": "ls指向busybox"
+      },
+      "/bin/cat": {
+        "target": "/bin/busybox",
+        "description": "cat指向busybox"
+      }
+    },
+    "libc_symlinks": {
+      "/lib/libc.so.0": {
+        "target_pattern": "/lib/libc-*.so",
+        "description": "C库版本链接",
+        "detection": "在/lib目录下查找libc-*.so实际文件"
+      },
+      "/lib/libm.so.0": {
+        "target_pattern": "/lib/libm-*.so",
+        "description": "数学库版本链接",
+        "detection": "在/lib目录下查找libm-*.so实际文件"
+      },
+      "/lib/ld-uClibc.so.0": {
+        "target_pattern": "/lib/ld-uClibc-*.so",
+        "description": "动态链接器",
+        "detection": "在/lib目录下查找ld-uClibc-*.so实际文件"
+      }
+    },
+    "network_symlinks": {
+      "/var/run/resolv.conf": {
+        "target": "/etc/resolv.conf",
+        "description": "DNS配置链接"
+      }
+    }
+  },
+  "library_symlink_rules": {
+    "versioned_library_pattern": {
+      "description": "版本化库文件的标准链接模式",
+      "pattern": "{libname}.so.{major} -> {libname}.so.{major}.{minor}.{patch}",
+      "example": "libc.so.0 -> libc-2.27.so",
+      "fix_strategy": {
+        "find_actual": "使用find或glob定位实际库文件",
+        "create_link": "ln -s {actual_file} {link_path}",
+        "verify": "ldconfig -r {rootfs}验证链接"
+      }
+    },
+    "ld_so_symlinks": {
+      "description": "动态链接器符号链接",
+      "common_patterns": {
+        "mips": [
+          "/lib/ld-linux.so.3 -> /lib/ld-linux-mipsn8.so.1",
+          "/lib/ld.so.1 -> /lib/ld-uClibc.so.0"
+        ],
+        "arm": [
+          "/lib/ld-linux.so.3 -> /lib/ld-linux-armhf.so.3",
+          "/lib/ld-linux-armhf.so.3 -> /lib/ld-2.27.so"
+        ]
+      }
+    }
+  },
+  "symlink_repair_strategies": {
+    "redirect_to_valid_target": {
+      "description": "重定向到存在的有效目标",
+      "steps": [
+        "查找目标文件是否存在",
+        "如果存在但路径错误，重新创建链接",
+        "如果不存在，检查可替换目标"
+      ],
+      "tools": ["find", "readlink", "ln"],
+      "example": {
+        "broken_link": "/lib/libc.so.0",
+        "intended_target": "/lib/libc-2.27.so",
+        "fix": "ln -sf /lib/libc-2.27.so /lib/libc.so.0"
+      }
+    },
+    "create_missing_target_as_device": {
+      "description": "创建目标为设备节点",
+      "applicable_when": "链接目标是/dev下的标准设备",
+      "steps": [
+        "识别设备类型",
+        "确定主次设备号",
+        "创建设备节点",
+        "重新创建符号链接"
+      ],
+      "example": {
+        "broken_link": "/dev/stdin",
+        "fix": "mknod -m 666 /dev/stdin c 1 3"
+      }
+    },
+    "remove_unnecessary_link": {
+      "description": "删除不必要的损坏链接",
+      "applicable_when": "链接功能不重要或可忽略",
+      "steps": [
+        "验证删除不影响核心功能",
+        "删除链接",
+        "记录删除操作"
+      ],
+      "example": {
+        "broken_link": "/dev/old_device",
+        "reason": "设备已废弃",
+        "fix": "rm /dev/old_device"
+      }
+    }
+  },
+  "intervention_cases": [
+    {
+      "case_id": "symlink_001",
+      "firmware": "D-Link DIR-882",
+      "broken_links": ["/dev/stdin", "/dev/stdout", "/dev/stderr"],
+      "strategy": "create_missing_target_as_device",
+      "outcome": "success",
+      "commands": [
+        "mknod -m 666 /dev/stdin c 1 3",
+        "mknod -m 666 /dev/stdout c 1 3",
+        "mknod -m 666 /dev/stderr c 1 3"
+      ]
+    },
+    {
+      "case_id": "symlink_002",
+      "firmware": "Tenda AC9",
+      "broken_links": ["/lib/libc.so.0"],
+      "strategy": "redirect_to_valid_target",
+      "outcome": "success",
+      "actual_file": "/lib/libc-2.27.so",
+      "commands": [
+        "ln -sf /lib/libc-2.27.so /lib/libc.so.0",
+        "ldconfig -r /path/to/rootfs"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+# FirmCure 核心依赖
+
+# LLM Agent 框架
+crewai>=1.14.1
+
+# 数据验证
+pydantic>=2.0.0
+
+# 二进制分析工具
+r2pipe>=1.9.0
+
+# YAML 配置解析
+PyYAML>=6.0
+
+# MCP 服务器（可选，用于集成其他工具）
+fastmcp>=0.1.0
+
+# 彩色终端输出（可选）
+colorama>=0.4.6

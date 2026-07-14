@@ -1,0 +1,116 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Web内容修复专家知识库",
+  "description": "WebExpert HTTP 500/404、CGI错误、页面缺失修复知识",
+  "httpd_start_method": "所有 httpd 启动测试统一使用 ./httpd_start.sh，不要手动拼接 httpd 命令。修复完成后用 vm_exec('./httpd_start.sh') 验证。",
+  "http_500_causes": {
+    "description": "HTTP 500 Internal Server Error 常见原因",
+    "causes": [
+      {
+        "name": "CGI执行失败",
+        "symptoms": ["CGI script failed", "Premature end of script headers", "script error"],
+        "check_steps": [
+          "vm_exec('ls -la /www/cgi/') 查看CGI目录",
+          "vm_exec('/www/cgi/my_cgi.cgi') 手动执行测试",
+          "vm_exec('ldd /www/cgi/my_cgi.cgi') 检查依赖库"
+        ],
+        "common_fixes": [
+          "检查CGI文件权限: chmod +x /www/cgi/my_cgi.cgi",
+          "检查依赖库是否存在",
+          "检查CGI脚本语法错误"
+        ]
+      },
+      {
+        "name": "配置错误",
+        "symptoms": ["config error", "directive unknown"],
+        "check_steps": [
+          "vm_exec('cat /var/etc/httpd.cfg') 检查配置",
+          "read_file 读取配置模板文件"
+        ],
+        "common_fixes": [
+          "修正CGI路径配置",
+          "检查External handler配置"
+        ]
+      },
+      {
+        "name": "依赖缺失",
+        "symptoms": ["library not found", "cannot open shared object"],
+        "check_steps": [
+          "vm_exec('ldd /www/cgi/*.cgi') 检查所有CGI依赖",
+          "vm_exec('ls /lib/') 查看可用库"
+        ],
+        "common_fixes": [
+          "从rootfs复制缺失的库文件",
+          "创建必要的设备节点"
+        ]
+      }
+    ]
+  },
+  "http_404_causes": {
+    "description": "HTTP 404 Not Found 常见原因",
+    "causes": [
+      {
+        "name": "Web根目录为空",
+        "symptoms": ["empty directory", "no index file"],
+        "check_steps": [
+          "vm_exec('ls -la /www/') 查看Web目录",
+          "vm_exec('ls -la /www/index.html') 检查首页"
+        ],
+        "common_fixes": [
+          "find_files '*.tgz' 搜索Web归档",
+          "vm_exec('tar -xzf /path/www.tgz -C /') 解压内容",
+          "vm_inject_file 创建简单index.html"
+        ]
+      },
+      {
+        "name": "路径配置错误",
+        "symptoms": ["wrong path", "alias error"],
+        "check_steps": [
+          "vm_exec('cat /var/etc/httpd.cfg') 检查Alias配置",
+          "检查Server配置中的Location"
+        ],
+        "common_fixes": [
+          "修改配置中的Alias路径",
+          "确保Web根目录与配置一致"
+        ]
+      },
+      {
+        "name": "归档未解压",
+        "symptoms": ["compressed content", ".tgz exists"],
+        "check_steps": [
+          "find_files '*.tgz' 搜索归档文件",
+          "find_files '*.tar.gz' 搜索tar.gz文件",
+          "vm_exec('ls /mnt/*.tgz') 查看VM中归档"
+        ],
+        "common_fixes": [
+          "vm_exec('tar -xzf /path/www.tgz -C /www') 解压",
+          "vm_exec('tar -xzf /mnt/www.tgz -C /') 解压到根"
+        ]
+      }
+    ]
+  },
+  "cgi_debug_workflow": {
+    "description": "CGI调试工作流",
+    "steps": [
+      "1. vm_exec('ls -la /www/cgi/') 查看CGI文件列表",
+      "2. vm_exec('cat /www/cgi/my_cgi.cgi') 查看CGI内容（如果是脚本）",
+      "3. vm_exec('/www/cgi/my_cgi.cgi') 手动执行CGI",
+      "4. vm_exec('ldd /www/cgi/my_cgi.cgi') 检查依赖库",
+      "5. 检查httpd.cfg中的CGI配置路径"
+    ]
+  },
+  "web_content_check": {
+    "description": "Web内容检查清单",
+    "check_items": [
+      "/www/index.html - 首页文件",
+      "/www/cgi/ - CGI脚本目录",
+      "/www/style.css - 样式文件",
+      "/www/images/ - 图片目录",
+      "/var/etc/httpd.cfg - HTTPD配置中的Alias"
+    ]
+  },
+  "simple_index_html": {
+    "description": "简单首页模板（用于快速修复404）",
+    "content": "<!DOCTYPE html>\n<html>\n<head><title>Router Management</title></head>\n<body>\n<h1>Router Web Interface</h1>\n<p>System is running.</p>\n</body>\n</html>"
+  }
+}

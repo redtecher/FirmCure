@@ -1,0 +1,219 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "文件系统修复专家知识库",
+  "description": "FileExpert 文件缺失、权限错误、符号链接修复知识",
+  "core_principle": "创建文件之前必须先收集上下文，不要凭猜测生成内容！",
+  "httpd_start_method": "所有 httpd 启动测试统一使用 ./httpd_start.sh，不要手动拼接 httpd 命令（如 httpd -f xxx）。修复完成后用 vm_exec('./httpd_start.sh') 验证。",
+  "warning_binary_files": {
+    "message": "禁止用 read_file 或 copy_to_rootfs 处理二进制文件！",
+    "binary_extensions": [
+      ".tgz",
+      ".tar.gz",
+      ".tar.bz2",
+      ".zip",
+      ".gz",
+      ".bin",
+      ".elf",
+      ".so",
+      ".cgi",
+      ".png",
+      ".jpg",
+      ".mp3",
+      ".mp4"
+    ],
+    "correct_approach": {
+      "归档文件(.tgz/.tar.gz)": "用 vm_exec 在 VM 中执行: tar -xzf /path/to/file.tgz -C /",
+      "可执行文件(.bin/.cgi/.elf)": "直接运行 VM 中已有的二进制，或用 vm_exec chmod +x 设置权限",
+      "库文件(.so)": "检查 VM 中是否已存在，不需要复制"
+    }
+  },
+  "httpd_config_repair": {
+    "description": "HTTPD 配置文件缺失的修复知识",
+    "typical_scenario": {
+      "problem": "rgdb 动态生成配置脚本失败，导致 /var/run/webs_start.sh 为空",
+      "root_cause": "配置模板系统依赖的 rgdb/gpio 等组件在仿真环境中不可用",
+      "solution": "手动创建静态配置文件"
+    },
+    "config_file_format_rules": {
+      "description": "配置文件写入格式规范 - 必须使用 heredoc 避免转义问题",
+      "correct_format": "cat > /etc/jhttpd.conf << 'ENDCONF'\nsrv_port 80\ndoc_root /www\nsrv_mode RUN_HTTP\nENDCONF",
+      "wrong_format": "echo 'srv_port 80' > /etc/jhttpd.conf (多行配置不要用 echo)",
+      "rules": [
+        "多行配置文件必须用 heredoc (cat > file << 'EOF' ... EOF)",
+        "heredoc 结束符用单引号包裹 ('ENDCONF') 避免变量展开",
+        "不要用 echo 逐行写入，容易出错且难以维护",
+        "不要用 printf，在 BusyBox 环境中行为不一致"
+      ],
+      "examples": {
+        "jhttpd_conf": "cat > /etc/jhttpd.conf << 'ENDCONF'\nsrv_port=80\ndoc_root=/www\nsrv_mode=RUN_HTTP\nENDCONF",
+        "lighttpd_conf": "cat > /etc/lighttpd/lighttpd.conf << 'ENDCONF'\nserver.document-root = \"/www\"\nserver.port = 80\nENDCONF",
+        "httpd_cfg": "cat > /var/etc/httpd.cfg << 'ENDCONF'\nPort 80\nDocumentRoot /www\nENDCONF"
+      }
+    },
+    "config_template": {
+      "description": "通用 httpd.cfg 配置模板（基于 realtek httpd）",
+      "content": "Umask 026\n\nTuning {\n    NumConnections 15\n    BufSize 12288\n    InputBufSize 4096\n    ScriptBufSize 4096\n    NumHeaders 100\n    Timeout 60\n    ScriptTimeout 60\n    MaxUploadSize 15859712\n}\n\nPIDFile /var/run/httpd.pid\nLogGMT On\n\nControl {\n    Types {\n        text/html { html htm php }\n        text/xml { xml }\n        text/plain { txt }\n        image/gif { gif }\n        image/jpeg { jpg }\n        text/css { css }\n        application/ocstream { * }\n    }\n    Specials {\n        Dump { /dump }\n        CGI { cgi }\n        Imagemap { map }\n        Redirect { url }\n        Internal { _int }\n    }\n    External {\n        /sbin/atp { php txt }\n        /sbin/xgi { xgi bin dcf log }\n        /sbin/sgi { sgi }\n    }\n    IndexNames { index.html index.php }\n}\n\nServer {\n    Port 80\n    Virtual {\n        AnyHost\n        Control {\n            Alias /\n            Location /www\n        }\n    }\n}"
+    },
+    "repair_steps": [
+      "1. 检查配置文件是否存在: vm_exec('cat /var/etc/httpd.cfg')",
+      "2. 检查动态生成脚本: vm_exec('cat /var/run/webs_start.sh')",
+      "3. 如果为空或不存在，手动创建配置: 使用 heredoc 格式写入",
+      "4. 创建必要目录: vm_exec('mkdir -p /var/etc /var/run /www')",
+      "5. 尝试启动: vm_exec('./httpd_start.sh')"
+    ]
+  },
+  "initd_dynamic_config_fix": {
+    "description": "init.d 启动脚本使用动态配置命令（config_load/config_get/nvram_get 等）获取参数，仿真环境中这些命令不可用，导致启动失败",
+    "pattern": "当 httpd_start.sh 调用 /etc/init.d/<service> start，而该脚本内部使用 config_load/config_get/nvram_get 等动态获取端口、路径等参数时",
+    "solution": "直接用 vm_exec sed 修改 /etc/init.d/<service> 脚本，将动态变量替换为静态值。例如将 config_get web_port ... 改为 web_port=80",
+    "case_vigor3900": {
+      "problem": "/etc/init.d/lighttpd 使用 config_load acc_ctrl / config_get 获取 web_port，仿真环境无 UCI 子系统",
+      "fix": "用 sed 将脚本中的动态端口获取替换为静态值 web_port=80，同时将 config_load/config_get 行注释掉。确保生成的 /etc/lighttpd/serverport.conf 内容正确",
+      "sed_commands": [
+        "vm_exec(\"sed -i 's/^config_load.*$/#&/' /etc/init.d/lighttpd\")",
+        "vm_exec(\"sed -i 's/^config_get web_port.*$/web_port=80/' /etc/init.d/lighttpd\")",
+        "vm_exec(\"sed -i 's/^config_get https_port.*$/https_port=443/' /etc/init.d/lighttpd\")"
+      ]
+    }
+  },
+  "boot_flow_analysis": {
+    "description": "常见固件启动流程分析知识",
+    "typical_boot_chain": {
+      "step1": "/etc/init.d/rcS → 主启动入口",
+      "step2": "/etc/scripts/system.sh → 系统初始化",
+      "step3": "/etc/templates/webs.sh start → Web服务启动脚本",
+      "step4": "rgdb -A /etc/templates/httpd/webs_run.php → 动态配置生成",
+      "step5": "/var/run/webs_start.sh → 生成的启动脚本",
+      "step6": "httpd -s <sign> -f /var/etc/httpd.cfg → HTTPD 启动"
+    },
+    "common_failures": {
+      "rgdb_missing": "rgdb 命令不存在，无法生成配置",
+      "gpio_missing": "gpio 相关设备缺失，初始化失败",
+      "nvram_missing": "nvram 库缺失，配置读取失败",
+      "empty_script": "动态生成的启动脚本为空"
+    },
+    "bypass_strategies": {
+      "rgdb_failure": "直接创建静态配置文件，跳过模板生成",
+      "missing_device": "创建必要的设备节点或注入 mock 库",
+      "config_missing": "根据二进制逆向结果手动创建配置"
+    }
+  },
+  "file_missing_workflow": {
+    "description": "文件缺失修复的三阶段工作流",
+    "phase_a": {
+      "name": "从 rootfs 查找原始文件",
+      "principle": "使用宿主机文件操作工具（read_file, find_files 等），不是 vm_exec！",
+      "steps": [
+        "find_files 搜索原始文件: find_files({pattern: 'httpd*'})",
+        "read_file 读取文本文件内容（不要读二进制文件！）",
+        "copy_to_rootfs 复制到 rootfs: copy_to_rootfs({src: '...', dst: '...'})"
+      ]
+    },
+    "phase_b": {
+      "name": "逆向分析二进制获取文件格式",
+      "trigger": "rootfs 中找不到原始文件时",
+      "steps": [
+        "open_file 打开 httpd 二进制，然后 analyze(level=2)",
+        "list_strings 搜索配置相关字符串（可用 filter 过滤）",
+        "list_functions 查找配置解析函数",
+        "disassemble_function 反汇编配置解析函数，了解期望的文件格式",
+        "基于逆向结果生成符合二进制实际期望格式的文件"
+      ]
+    },
+    "phase_c": {
+      "name": "创建/修复文件",
+      "steps": [
+        "vm_inject_file 写入文件",
+        "vm_fix_permissions 设置权限"
+      ]
+    }
+  },
+  "permission_fix": {
+    "rules": [
+      {
+        "file_type": "可执行文件",
+        "mode": "755"
+      },
+      {
+        "file_type": "配置文件",
+        "mode": "644"
+      },
+      {
+        "file_type": "脚本",
+        "mode": "755"
+      },
+      {
+        "file_type": "Web 内容",
+        "mode": "644"
+      },
+      {
+        "file_type": "目录",
+        "mode": "755"
+      }
+    ]
+  },
+  "web_content_repair": {
+    "description": "Web 内容缺失（HTTP 404）的修复知识",
+    "common_causes": [
+      "Web 根目录为空（内容来自运行时解压）",
+      "归档文件未被解压（.tgz/.tar.gz）",
+      "CGI 符号链接缺失",
+      "启动二进制未执行文件复制操作"
+    ],
+    "repair_steps": [
+      "用 find_files 搜索归档文件 (.tgz, .tar.gz)",
+      "用 read_file 读取 rcS 等文本启动脚本（不是二进制！）",
+      "用 vm_exec 在 VM 中执行 tar 解压命令: tar -xzf /mnt/www.tgz -C /",
+      "用 vm_exec 创建必要的符号链接: ln -sf /usr/bin/cgi /www/cgi.cgi"
+    ]
+  },
+  "archive_handling": {
+    "description": "归档文件处理方式",
+    "tgz": {
+      "detect": "find_files({pattern: '*.tgz'})",
+      "action": "vm_exec({command: 'tar -xzf /path/to/file.tgz -C /'})",
+      "note": "不要用 read_file 读取 .tgz 文件内容"
+    },
+    "tar_gz": {
+      "detect": "find_files({pattern: '*.tar.gz'})",
+      "action": "vm_exec({command: 'tar -xzf /path/to/file.tar.gz -C /'})"
+    }
+  },
+  "standard_device_nodes": {
+    "/dev/null": {
+      "type": "c",
+      "major": "1",
+      "minor": "3"
+    },
+    "/dev/zero": {
+      "type": "c",
+      "major": "1",
+      "minor": "5"
+    },
+    "/dev/random": {
+      "type": "c",
+      "major": "1",
+      "minor": "8"
+    },
+    "/dev/urandom": {
+      "type": "c",
+      "major": "1",
+      "minor": "9"
+    },
+    "/dev/console": {
+      "type": "c",
+      "major": "5",
+      "minor": "1"
+    },
+    "/dev/ttyS0": {
+      "type": "c",
+      "major": "4",
+      "minor": "64"
+    },
+    "/dev/tty": {
+      "type": "c",
+      "major": "5",
+      "minor": "0"
+    }
+  }
+}

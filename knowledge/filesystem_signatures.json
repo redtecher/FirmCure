@@ -1,0 +1,29 @@
+{
+  "filesystems": [
+    {
+      "name": "SquashFS",
+      "magic": ["hsqs", "sqsh", "qshs", "hsqt", "sqlz", "zshs"],
+      "description": "SquashFS 压缩只读文件系统",
+      "extractor": "unsquashfs",
+      "variants": ["little", "big", "lzma", "zstd"]
+    },
+    {
+      "name": "JFFS2",
+      "magic": ["0x1985", "0x8519"],
+      "description": "JFFS2 日志闪存文件系统",
+      "extractor": "jffs2extractor"
+    },
+    {
+      "name": "CramFS",
+      "magic": ["Compressed ROMFS"],
+      "description": "CramFS 压缩 ROM 文件系统",
+      "extractor": "cramfsck"
+    },
+    {
+      "name": "UBI",
+      "magic": ["UBI#"],
+      "description": "UBI 闪存映像",
+      "extractor": "ubireader"
+    }
+  ]
+}
