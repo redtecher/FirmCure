@@ -5,6 +5,7 @@
 
 import os
 import re
+import stat
 import tempfile
 import time
 import subprocess
@@ -413,9 +414,30 @@ class DiskBuilder:
             ("tty",     "c", "5", "0", "666"),
         ]
 
+        want_is_type = {"c": stat.S_ISCHR, "b": stat.S_ISBLK}
         for name, dtype, major, minor, mode in devices:
             dev_path = dev_dir / name
-            if not dev_path.exists():
+            # squashfs 常把 /dev/console、/dev/null 等留作"占位普通文件"。
+            # 若仅用 exists() 判断,这些占位文件会被跳过而保持为普通文件:
+            # 内核仍能 open 它作为 init 的 stdio,但 init(/bin/sh)拿到的是非 tty 的空文件 stdin,
+            # 读到 EOF 立即退出 → "Kernel panic - not syncing: Attempted to kill init!"。
+            # 因此当已存在项不是所需类型/主次设备号的设备节点时,必须先删除再用 mknod 重建。
+            need_create = True
+            if dev_path.is_symlink() or dev_path.exists():
+                try:
+                    st = os.lstat(dev_path)
+                    is_correct = (
+                        want_is_type[dtype](st.st_mode)
+                        and os.major(st.st_rdev) == int(major)
+                        and os.minor(st.st_rdev) == int(minor)
+                    )
+                except OSError:
+                    is_correct = False
+                if is_correct:
+                    need_create = False
+                else:
+                    self._run_sudo(f"rm -f {dev_path}", check=False)
+            if need_create:
                 self._run_sudo(f"mknod -m {mode} {dev_path} {dtype} {major} {minor}", check=False)
                 print(f"    [dev] 创建 {name}")
 

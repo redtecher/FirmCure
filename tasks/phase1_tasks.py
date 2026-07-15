@@ -103,9 +103,12 @@ def create_startup_analysis_task(rootfs_path: str, agent: Agent) -> Task:
 5. 对后台守护进程二进制使用逆向工具提取字符串，发现运行时操作(tar解压、目录创建、文件复制)
    ⚠️ 每个新二进制都必须先 open_file 再 analyze，然后才能查询
 6. 使用 readelf_deps 检查HTTPD二进制的共享库依赖
+   ⚠️ shared_libraries 必须按“二进制路径 → 其依赖库列表”分组，至少要包含 httpd 自身的依赖（key=httpd完整路径）
 7. 使用逆向工具检查HTTPD二进制的导入符号，识别NVRAM相关依赖(apmib_init, apmib_get, nvram_get, nvram_set, nvram_commit)
    ⚠️ open_file(httpd完整路径) → analyze(level=2) → list_imports
-   ⚠️ 如果依赖库或导入函数里出现 apmib / nvram / flash_read_raw_mib / flash_write_raw_mib / tcapi 等痕迹，必须输出 `nvram_needed=true`
+   ⚠️ nvram_needed 只有在「HTTPD 二进制本身」链接或导入 apmib / nvram / flash_read_raw_mib / flash_write_raw_mib / tcapi 时才置 true。
+      切勿因为 rootfs 里存在 /usr/sbin/nvram、libapmib.so，或某个 cgi/守护进程用了 nvram 就置 true——
+      那些是其它程序的事，与 httpd 服务启动是否依赖 nvram 无关（典型反例：lighttpd 只链接 libpcre/libdl/libc，不依赖 nvram）。
 8. 从固件路径和文件内容推断厂商
 
 你必须调用至少5次工具后才能给出结果。

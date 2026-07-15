@@ -273,10 +273,18 @@ class FirmCureFlow(Flow[FirmCureState]):
         return None
 
     def _infer_nvram_requirement(self, data: dict):
-        """根据依赖库/导入函数自动推断是否需要 NVRAM 模拟。
+        """判断 HTTPD 自身是否依赖 NVRAM，仅在依赖时才注入 libnvram-faker.so。
 
-        用户要求：只要检测到 httpd 依赖或导入了 apmib/nvram 等相关函数，
-        Phase 2 就必须注入 libnvram.so，并在 httpd_start.sh 中设置 LD_PRELOAD。
+        重要：检测范围必须限定在 HTTPD 二进制本身，而不是整个 rootfs。
+        dependencies 里的 direct_dependencies / nvram_functions 往往是跨二进制聚合的
+        （会包含 /usr/sbin/nvram、cgi、libshared 等其它程序的依赖/符号），直接对它们做
+        关键字匹配会导致：只要固件里“存在”任何 nvram 相关代码就被误判为需要注入，进而把
+        libnvram-faker.so 注入到根本不调用 nvram 的 httpd（典型如 lighttpd）上。
+
+        因此这里改为只取 HTTPD 自身的共享库列表（shared_libraries[httpd_path]），判断其中
+        是否出现 apmib/nvram/tcapi 等库。若 httpd 自身不依赖，则把 LLM 可能误设的
+        nvram_needed 纠正回 False；取不到 httpd 自身依赖时，退化为旧的聚合匹配（仅在尚未
+        判定时启用，避免回退引入新的误注入）。
         """
         if not isinstance(data, dict):
             return
@@ -285,21 +293,41 @@ class FirmCureFlow(Flow[FirmCureState]):
         if not isinstance(deps, dict):
             deps = {}
 
-        trigger_values = []
-        for key in ("shared_libraries", "direct_dependencies", "nvram_functions"):
-            values = deps.get(key, [])
-            if isinstance(values, list):
-                trigger_values.extend(str(v).lower() for v in values)
+        httpd_path = self._resolve_httpd_binary_path(data)
+        httpd_libs, httpd_libs_resolved = self._collect_httpd_libs(deps, httpd_path)
 
-        nvram_detected = any(
-            keyword in value
-            for value in trigger_values
-            for keyword in self.NVRAM_TRIGGER_KEYWORDS
-        )
-
-        if nvram_detected and not data.get("nvram_needed", False):
-            data["nvram_needed"] = True
-            logger.info("Phase 1: inferred nvram_needed=true from httpd dependencies/imports")
+        if httpd_libs_resolved:
+            # 拿到了 httpd 自身的依赖 → 以此为准（双向纠正 LLM 的判定）
+            httpd_needs_nvram = any(
+                keyword in str(lib).lower()
+                for lib in httpd_libs
+                for keyword in self.NVRAM_TRIGGER_KEYWORDS
+            )
+            if httpd_needs_nvram and not data.get("nvram_needed", False):
+                data["nvram_needed"] = True
+                logger.info(
+                    f"Phase 1: nvram_needed=true (httpd {httpd_path} 自身依赖含 nvram 相关库: {httpd_libs})"
+                )
+            elif (not httpd_needs_nvram) and data.get("nvram_needed", False):
+                data["nvram_needed"] = False
+                logger.info(
+                    f"Phase 1: 纠正 nvram_needed=false (httpd {httpd_path} 自身依赖 {httpd_libs} 无 nvram 相关库)"
+                )
+        else:
+            # 退化：分析未按二进制拆分依赖，沿用旧的聚合匹配（仅在尚未判定时启用）
+            trigger_values = []
+            for key in ("direct_dependencies", "nvram_functions"):
+                values = deps.get(key, [])
+                if isinstance(values, list):
+                    trigger_values.extend(str(v).lower() for v in values)
+            nvram_detected = any(
+                keyword in value
+                for value in trigger_values
+                for keyword in self.NVRAM_TRIGGER_KEYWORDS
+            )
+            if nvram_detected and not data.get("nvram_needed", False):
+                data["nvram_needed"] = True
+                logger.info("Phase 1: nvram_needed=true (退化聚合匹配，未取得 httpd 专属依赖)")
 
         if data.get("nvram_needed", False) and not data.get("nvram_arch"):
             resolved_arch = self._resolve_nvram_arch(data)
@@ -315,6 +343,49 @@ class FirmCureFlow(Flow[FirmCureState]):
                 if libc:
                     data["nvram_libc"] = libc
                     logger.info(f"Phase 1: inferred nvram_libc={libc}")
+
+    def _resolve_httpd_binary_path(self, data: dict) -> Optional[str]:
+        """从分析结果里定位 httpd 二进制路径。
+
+        优先取 httpd_service.binary_path；否则回退到 httpd_command / httpd_startup 的首个 token。
+        """
+        hs = data.get("httpd_service")
+        if isinstance(hs, dict) and hs.get("binary_path"):
+            return str(hs["binary_path"]).strip()
+        cmd = data.get("httpd_command")
+        if not cmd and isinstance(hs, dict):
+            cmd = hs.get("httpd_startup")
+        if not cmd:
+            ss = data.get("startup_sequence")
+            if isinstance(ss, dict):
+                cmd = ss.get("httpd_startup")
+        if cmd:
+            tokens = str(cmd).strip().split()
+            if tokens:
+                return tokens[0]
+        return None
+
+    def _collect_httpd_libs(self, deps: dict, httpd_path: Optional[str]) -> tuple:
+        """取出 HTTPD 自身的共享库列表。
+
+        返回 (libs, resolved)：resolved=True 表示成功按 httpd 归属取到专属依赖——
+        shared_libraries 是 dict 时按路径(或 basename)命中 httpd；shared_libraries 直接是
+        列表时（任务模板的退化形态）视作 httpd 自身的库。否则返回 ([], False) 走退化路径。
+        """
+        sl = deps.get("shared_libraries")
+        if isinstance(sl, dict):
+            if httpd_path:
+                if httpd_path in sl:
+                    return (list(sl[httpd_path] or []), True)
+                base = httpd_path.rstrip("/").split("/")[-1]
+                for k, v in sl.items():
+                    if k and str(k).rstrip("/").split("/")[-1] == base:
+                        return (list(v or []), True)
+            # dict 但对不上 httpd：无法可靠归属，返回未解析（走退化路径）
+            return ([], False)
+        if isinstance(sl, list):
+            return (list(sl), True)
+        return ([], False)
 
     # 硬件依赖守护进程黑名单 - QEMU中启动会死循环或崩溃
     HW_DAEMON_BLACKLIST = [

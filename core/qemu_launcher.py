@@ -19,19 +19,28 @@ from .network_setup import setup_network, setup_qemu_ifup, restore_qemu_ifup, cl
 class QEMULauncher:
     """QEMU 启动和执行监控"""
 
+    # 启动成功的标志：shell 提示符或登录/console 激活提示。
+    # 匹配时取累计日志的尾部做子串判断（pty 可能把提示符切分到多次读取），不再用整行精确匹配。
     SUCCESS_PATTERNS = [
         "/ #",
         "/ $",
-        "/ ~",
-        "# ",
+        "~ #",
+        "~ $",
         "login:",
+        "Please press Enter to activate this console",
+        "Welcome to",
     ]
 
+    # 启动失败的标志：出现即立即终止，不再干等到超时。
     FAILURE_PATTERNS = [
         "Kernel panic",
         "not syncing",
+        "Attempted to kill init",
+        "No working init found",
         "No init found",
+        "Unable to mount root",
         "can't load library",
+        "error while loading shared libraries",
     ]
 
     def __init__(self, timeout: int = 180, log_dir: Path = None, sudo_password: str = ""):
@@ -50,32 +59,28 @@ class QEMULauncher:
         success = False
         rootfs_mounted = False
         failure_detected = False
-        success_lines = 0
         logs = ""
         start_time = time.time()
         master_fd = None
 
         try:
             with open(log_file, 'w') as log_f:
-                # 预认证 sudo，刷新时间戳
-                if self.sudo_password:
-                    try:
-                        subprocess.run(
-                            f"echo '{self.sudo_password}' | sudo -S -v",
-                            shell=True, capture_output=True, timeout=5,
-                        )
-                    except Exception:
-                        pass
-                full_cmd = f"sudo {cmd}"
+                # 不要用 sudo 包装 qemu：tap0 已由 setup_network() 以 `-u $(whoami)` 创建
+                # （属主为当前用户），/etc/qemu-ifup 也被替换为 no-op，qemu 可直接以普通用户
+                # 身份 attach tap0，无需 root。
+                # 此前 `sudo qemu` 会在 pty 子进程里因 tty_tickets 不延续而卡在密码提示，
+                # 导致 qemu 根本没启动、qemu.log 几乎为空、启动检测永远不触发，最终干等 180s 超时。
+                full_cmd = cmd
 
-                # 使用 pty 代替 pipe，强制 QEMU 行缓冲
-                # 解决 sudo 缓冲导致 launcher 读不到 kernel panic 等输出的问题
+                # pty 同时作为 qemu 的 stdin/stdout/stderr：
+                #   1) 强制行缓冲，能实时读到 kernel panic / shell 提示符并 flush 进 qemu.log；
+                #   2) stdin 也接到 pty，向 master 写入 "\n" 才能真正送到 guest 串口触发提示符。
                 master_fd, slave_fd = pty.openpty()
 
                 process = subprocess.Popen(
                     full_cmd,
                     shell=True,
-                    stdin=subprocess.PIPE,
+                    stdin=slave_fd,
                     stdout=slave_fd,
                     stderr=slave_fd,
                     close_fds=True,
@@ -122,35 +127,27 @@ class QEMULauncher:
                     log_f.write(text)
                     log_f.flush()
 
-                    # 逐行检查模式
-                    for line in text.splitlines():
-                        stripped = line.strip()
-                        for pattern in self.SUCCESS_PATTERNS:
-                            if stripped == pattern.strip():
-                                print(f"[✓] 检测到 shell 提示符: {pattern}")
-                                rootfs_mounted = True
-                                success = True
+                    # 实时检查启动结果：每读到一段就判一次，命中即排空残留输出并立即终止，
+                    # 不再干等到超时。
+                    if not success and self._match_success(logs[-300:]):
+                        rootfs_mounted = True
+                        print("[✓] 检测到 shell 提示符/登录提示，判定启动成功")
+                        success = True
+                        logs += self._drain_fd(master_fd, log_f)
+                        self._terminate(process)
+                        break
 
-                        if success:
-                            success_lines += 1
-                            if success_lines >= 1:
-                                time.sleep(3)
-                                logs += self._drain_fd(master_fd, log_f)
-                                self._terminate(process)
-                                break
-
+                    if not failure_detected:
                         for pattern in self.FAILURE_PATTERNS:
-                            if pattern in line:
-                                print(f"[!] 检测到: {pattern}")
+                            if pattern in text:
+                                print(f"[!] 检测到失败标志: {pattern}")
                                 success = False
                                 failure_detected = True
-
+                                break
                         if failure_detected:
+                            logs += self._drain_fd(master_fd, log_f)
                             self._terminate(process)
                             break
-
-                    if (success and success_lines >= 1) or failure_detected:
-                        break
 
                 self._terminate(process)
 
@@ -224,6 +221,13 @@ class QEMULauncher:
         except (BlockingIOError, OSError):
             pass
         return new_text
+
+    def _match_success(self, tail: str) -> bool:
+        """判断日志尾部是否出现 shell 提示符或登录/console 激活提示。
+
+        取累计日志的尾部做子串匹配，避免 pty 把提示符切分到多次读取时漏判。
+        """
+        return any(pattern in tail for pattern in self.SUCCESS_PATTERNS)
 
     def run_with_network(self, command: QEMUCommand, tap_name: str = "tap0") -> ExecutionResult:
         setup_network(tap_name)
