@@ -88,3 +88,5 @@ kernel_build/*
 docs/
 
 .crewai_storage/
+
+kernel_build/

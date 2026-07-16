@@ -1784,12 +1784,12 @@ class FirmCureFlow(Flow[FirmCureState]):
         return {}
 
     def _infer_fault_from_log_tail(self, httpd_output: str) -> str:
-        """优先根据日志末尾的具体报错快速推断故障类型。
+        """仅对无歧义的网络层错误做 fast-path；其余故障一律交 Manager(LLM) 判断。
 
         原则：
-        - 优先看最后几行“最接近失败点”的日志，而不是只依赖 is_hung / process_running
-        - 明确的文件/脚本/Lua/CGI 错误，优先交给 file_expert
-        - 明确的网络/地址族错误，优先交给 network_expert
+        - 只在高置信时返回（如 AF_INET6 等明确地址族错误 → NETWORK_ERROR）
+        - 文件/socket/连接/状态码等信号存在歧义（unix socket 连接失败 vs 文件缺失），
+          不在此预判，交给 Manager 依据 diagnosis.json 知识库推理，避免污染 LLM 判断
         """
         if not httpd_output:
             return ""
@@ -1808,27 +1808,9 @@ class FirmCureFlow(Flow[FirmCureState]):
         if any(p in tail for p in network_patterns):
             return "NETWORK_ERROR"
 
-        file_patterns = [
-            "not found",
-            "no such file",
-            "lua handler had runtime error",
-            "url-routing.lua",
-            "unknown distribution",
-            "cgi-bin",
-            "net-cgi",
-        ]
-        if any(p in tail for p in file_patterns):
-            return "FILE_MISSING"
-
-        web_patterns = [
-            "404",
-            "500",
-            "forbidden",
-            "bad gateway",
-        ]
-        if any(p in tail for p in web_patterns):
-            return "WEB_ERROR"
-
+        # 其余信号（含 "no such file" / "connect cfm failed" 等）存在歧义——可能是
+        # 文件缺失，也可能是 unix socket / IPC 连接失败导致的崩溃。一律交给 Manager
+        # 依据 diagnosis.json 知识库（socket_vs_file / tenda_cfm_error 等规则）判断。
         return ""
 
     def _infer_fault_from_validation(self, validation) -> str:

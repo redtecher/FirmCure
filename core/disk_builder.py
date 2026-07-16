@@ -487,12 +487,24 @@ class DiskBuilder:
             if vendor and vendor.lower() == "tenda":
                 tenda_br0_block = f'''
 # === Tenda: 配置 br0 bridge 接口 ===
+# 2.6.32 内核的 bridge 只注册了 ioctl 接口(brctl)，未注册 netlink rtnl_link，
+# 故 `ip link add type bridge` 会返回 EOPNOTSUPP(Operation not supported)。
+# 因此优先用 brctl 创建，ip link add 仅作为 3.x 内核的 fallback。
 echo "[Tenda] 配置 br0 接口..."
-ip link add name br0 type bridge 2>/dev/null
-ip link set br0 up
-ip addr add 10.10.10.2/24 dev br0
-route add default gw 10.10.10.1 2>/dev/null
-echo "[Tenda] br0 配置完成"
+_br0_ok=0
+if command -v brctl >/dev/null 2>&1 && brctl addbr br0 2>/dev/null; then
+    _br0_ok=1
+elif ip link add name br0 type bridge 2>/dev/null; then
+    _br0_ok=1
+fi
+if [ "$_br0_ok" = "1" ]; then
+    ip link set br0 up
+    ip addr add 10.10.10.2/24 dev br0 2>/dev/null || ifconfig br0 10.10.10.2 netmask 255.255.255.0 up
+    route add default gw 10.10.10.1 2>/dev/null
+    echo "[Tenda] br0 配置完成 (10.10.10.2)"
+else
+    echo "[Tenda] br0 创建失败:brctl 与 ip link add 均不可用"
+fi
 '''
 
             # 非 Tenda: 主接口直接用 10.10.10.2; Tenda: 主接口用 10.10.10.3, br0 用 10.10.10.2

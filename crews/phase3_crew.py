@@ -182,11 +182,9 @@ def create_phase3_hierarchical_crew(
 
 ## 日志分析优先级
 - 先看**日志最后几行**，优先处理离失败点最近的具体报错
-- 如果日志尾部出现以下线索，优先按下面路由：
-  - `not found`, `No such file`, `Lua handler had runtime error`, `url-routing.lua`, `unknown distribution`, `net-cgi`
-    → file_expert
-  - `Address family not supported`, `Protocol family not supported`, `AF_INET6`, 路由/绑定错误
-    → network_expert
+- 依据知识库（diagnosis.json）的故障路由表与分类提示推理判断，不要套用固定关键词
+- 注意歧义：`No such file or directory` 在 httpd 启动日志里可能是 unix socket / IPC 连接失败（崩溃），而非文件缺失——结合上下文判断，不要直接归 file_expert
+- 明确的网络层错误（`Address family not supported` / `Protocol family not supported` / `AF_INET6` / 路由或绑定失败）→ network_expert
 - 只有在日志里没有更具体线索时，才可使用“进程在但端口不开 → crash_expert”的兜底规则
 
 ## 关键路径说明（分配给专家时必须传达）
