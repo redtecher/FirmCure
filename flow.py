@@ -365,6 +365,46 @@ class FirmCureFlow(Flow[FirmCureState]):
                 return tokens[0]
         return None
 
+    def _resolve_httpd_command(self, data: dict) -> Optional[str]:
+        """兜底推导 httpd_command（不含 LD_PRELOAD）。
+
+        当报告 agent 未产出 httpd_command（如 case 019：/bin/dms 打不开、
+        dms 由 init 脚本间接拉起无干净命令行）时，从 httpd_service.binary_path
+        回退出一个可执行命令。
+
+        只对「已知接受 -p/-h」的标准 web 服务器补端口/webroot 参数；
+        nginx/lighttpd/custom_*（如 TP-Link dms，无命令行参数）只给裸二进制路径，
+        避免注入错误参数导致 httpd 启动即崩。
+        """
+        binary = self._resolve_httpd_binary_path(data)
+        if not binary:
+            return None
+
+        hs = data.get("httpd_service")
+        httpd_type = ""
+        port = None
+        web_root = None
+        if isinstance(hs, dict):
+            httpd_type = str(hs.get("type") or "").lower()
+            port = hs.get("port")
+            web_root = hs.get("web_root")
+
+        # 接受 -p <port> -h <webroot> 的标准 web 服务器白名单
+        arg_friendly = {
+            "goahead", "boa", "httpd", "mini_httpd", "mini-httpd",
+            "thttpd", "uhttpd", "busybox-httpd",
+        }
+        if httpd_type in arg_friendly:
+            args = []
+            if port:
+                args += ["-p", str(port)]
+            if web_root:
+                args += ["-h", str(web_root)]
+            return f"{binary} {' '.join(args)}" if args else binary
+
+        # custom_* / nginx / lighttpd / apache / 未知 → 裸二进制路径（最保守）
+        return binary
+
     def _collect_httpd_libs(self, deps: dict, httpd_path: Optional[str]) -> tuple:
         """取出 HTTPD 自身的共享库列表。
 
@@ -415,8 +455,59 @@ class FirmCureFlow(Flow[FirmCureState]):
             filtered.append(line)
         return "\n".join(filtered)
 
+    def _fallback_startup_script(self, data: dict) -> str:
+        """生成最小可用 startup.sh（agent 未提供 startup_script_content 时的兜底）。
+
+        仅做 QEMU 环境必需的运行时初始化：运行时目录、虚拟文件系统挂载。
+        不启动 httpd、不配置网络、不拉起任何厂商/硬件守护进程。
+        比完全缺失 startup.sh（rootfs 无 /var/run、/proc 等）更可能让 httpd 正常起来。
+        """
+        return """#!/bin/sh
+# FirmCure - 兜底启动脚本 (agent 未提供 startup_script_content)
+# 仅含 QEMU 运行时最小初始化，不含厂商守护进程运行时操作
+
+# 运行时目录
+mkdir -p /var/run /var/log /var/lock /var/state /tmp /dev/pts
+
+# 虚拟文件系统挂载
+mount -t proc proc /proc 2>/dev/null || true
+mount -t sysfs sysfs /sys 2>/dev/null || true
+mount -t devpts devpts /dev/pts 2>/dev/null || true
+mount -t tmpfs tmpfs /tmp 2>/dev/null || true
+mount -t tmpfs tmpfs /var/run 2>/dev/null || true
+"""
+
     def _save_scripts(self, data: dict, output_dir: str, rootfs_path: str):
-        """保存启动脚本"""
+        """保存启动脚本。
+
+        httpd_command / startup_script_content 为空时先做兜底推导并回写 data，
+        避免报告 agent 漏字段导致 startup.sh、httpd_start.sh 静默缺失
+        （case 019：/bin/dms 打不开 → 顶层 httpd_command 与 startup_script_content
+        均缺失，两个脚本都没生成）。回写后由调用方对 phase1_analysis.json 的重存
+        持久化给 phase2 的 disk_builder。
+        """
+        # httpd_command 兜底
+        if not (data.get("httpd_command") or "").strip():
+            resolved_cmd = self._resolve_httpd_command(data)
+            if resolved_cmd:
+                data["httpd_command"] = resolved_cmd
+                logger.warning(
+                    f"Phase 1: httpd_command 缺失，已兜底推导为 {resolved_cmd!r} "
+                    f"(httpd_service.type={(data.get('httpd_service') or {}).get('type')!r})"
+                )
+            else:
+                logger.error(
+                    "Phase 1: httpd_command 缺失且无法推导（未定位到 httpd 二进制路径），"
+                    "httpd_start.sh 将不生成"
+                )
+
+        # startup_script_content 兜底
+        if not (data.get("startup_script_content") or "").strip():
+            data["startup_script_content"] = self._fallback_startup_script(data)
+            logger.warning(
+                "Phase 1: startup_script_content 缺失，已生成最小兜底启动脚本 "
+                "(仅运行时目录/挂载，未含厂商守护进程运行时操作)"
+            )
         # startup.sh
         startup_content = data.get("startup_script_content", "")
         if startup_content:
@@ -616,24 +707,74 @@ class FirmCureFlow(Flow[FirmCureState]):
 
         logger.info(f"Summary saved to {summary_file}")
 
-    def _extract_json_from_text(self, text: str) -> dict | None:
-        """从文本中提取JSON"""
-        try:
-            if "```json" in text:
-                start = text.index("```json") + 7
-                end = text.index("```", start)
-                return json.loads(text[start:end].strip())
-            elif "```" in text:
-                start = text.index("```") + 3
-                end = text.index("```", start)
-                return json.loads(text[start:end].strip())
-            elif "{" in text and "}" in text:
-                start = text.index("{")
-                end = text.rindex("}") + 1
-                return json.loads(text[start:end])
-        except (json.JSONDecodeError, ValueError):
-            pass
+    def _find_balanced_json(self, text: str, start: int) -> Optional[int]:
+        """从 text[start] == '{' 起做字符串感知的花括号配平，返回匹配 '}' 的下标+1。
+
+        会正确忽略 JSON 字符串字面量内部的 { } 与转义 \\"，因此即使字符串值里
+        嵌入了未转义的花括号也不会误判边界。配平失败返回 None。
+        """
+        depth = 0
+        in_str = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_str = False
+            else:
+                if ch == '"':
+                    in_str = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return i + 1
         return None
+
+    def _extract_json_from_text(self, text: str) -> Optional[dict]:
+        """从文本中提取最外层 JSON 对象。
+
+        不依赖 ``` 代码栅栏成对匹配——LLM 经常在 JSON 字符串值（如
+        context_summary、startup_script_content、diagnosis）里嵌入 ``` 代码块，
+        旧的 ``text.index('```', start)`` 会命中字符串内部的 ``` 而提前截断，
+        导致 json.loads 失败、整段 JSON 被丢弃。
+
+        典型案例 case 021：agent 完整产出了 httpd_command=/bin/dms 与一大段
+        startup_script_content，但其 context_summary 内含 ``` 代码块，旧逻辑把
+        JSON 从中间截断 → 返回 None → 回退到 merge 分支（该分支不处理这两个字段）
+        → 最终生成兜底启动脚本，丢失厂商守护进程运行时操作。
+
+        现改为：跳过可选的前导 ```json 栅栏（仅去头，避免误伤字符串内部的 ```），
+        再用字符串感知的花括号配平定位最外层 { ... }，并从每个 '{' 候选起点重试，
+        直到拿到可解析的 dict。
+        """
+        if not text:
+            return None
+        stripped = text.lstrip()
+        if stripped.startswith("```json"):
+            stripped = stripped[len("```json"):]
+        elif stripped.startswith("```"):
+            stripped = stripped[3:]
+
+        search_from = 0
+        while True:
+            start = stripped.find("{", search_from)
+            if start == -1:
+                return None
+            end = self._find_balanced_json(stripped, start)
+            if end is not None:
+                try:
+                    data = json.loads(stripped[start:end])
+                    if isinstance(data, dict):
+                        return data
+                except json.JSONDecodeError:
+                    pass
+            search_from = start + 1
 
     def _merge_task_results(self, result, rootfs_path: str) -> dict:
         """从多个子任务结果合并最终的Phase 1分析数据"""
@@ -1111,18 +1252,8 @@ class FirmCureFlow(Flow[FirmCureState]):
         repair_data = {}
         try:
             result_text = str(result)
-            if "```json" in result_text:
-                start = result_text.index("```json") + 7
-                end = result_text.index("```", start)
-                parsed = json.loads(result_text[start:end].strip())
-            elif "{" in result_text:
-                start = result_text.index("{")
-                end = result_text.rindex("}") + 1
-                parsed = json.loads(result_text[start:end])
-            else:
-                parsed = {}
-
-            # json.loads 可能返回 None（JSON 内容为 null）
+            parsed = self._extract_json_from_text(result_text)
+            # _extract_json_from_text 可能返回 None（解析失败或 JSON 内容为 null）
             repair_data = parsed if isinstance(parsed, dict) else {}
 
             logger.info(f"Repair diagnosis: {repair_data.get('diagnosis', 'N/A')}")
@@ -1252,8 +1383,12 @@ class FirmCureFlow(Flow[FirmCureState]):
                 return {"success": False, "error": "QEMU start failed"}
 
             # 等待shell提示符 (wait_for_prompt内部已包含stty -echo)
-            logger.info("Waiting for QEMU shell...")
-            if not shell.wait_for_prompt(timeout=60):
+            # arm64 用 -cpu max 全特性仿真，启动比 mips/armhf 慢得多（实测 -cpu max 下
+            # 到 / # 要 ~90s），固定 60s 会误判超时（case 022）。按架构放大等待窗口。
+            arch_l = str(architecture).lower()
+            prompt_timeout = 180 if ("arm64" in arch_l or "aarch64" in arch_l) else 60
+            logger.info(f"Waiting for QEMU shell (timeout={prompt_timeout}s)...")
+            if not shell.wait_for_prompt(timeout=prompt_timeout):
                 logger.error("QEMU boot timeout")
                 return {"success": False, "error": "QEMU boot timeout"}
 
@@ -1726,16 +1861,7 @@ class FirmCureFlow(Flow[FirmCureState]):
     def _parse_diagnosis(self, result_text: str, fallback_status: str):
         """解析诊断结果"""
         try:
-            if "```json" in result_text:
-                start = result_text.index("```json") + 7
-                end = result_text.index("```", start)
-                data = json.loads(result_text[start:end].strip())
-            elif "{" in result_text:
-                start = result_text.index("{")
-                end = result_text.rindex("}") + 1
-                data = json.loads(result_text[start:end])
-            else:
-                data = {}
+            data = self._extract_json_from_text(result_text) or {}
 
             fault_type = data.get("fault_type", "UNKNOWN")
             reasoning = data.get("reasoning", "")
@@ -1747,20 +1873,9 @@ class FirmCureFlow(Flow[FirmCureState]):
 
     def _parse_expert_result(self, result_text: str) -> dict:
         """从专家输出中解析结构化 JSON 结果"""
-        try:
-            # 尝试提取 JSON
-            if "```json" in result_text:
-                start = result_text.index("```json") + 7
-                end = result_text.index("```", start)
-                return json.loads(result_text[start:end].strip())
-            elif "{" in result_text and "}" in result_text:
-                start = result_text.index("{")
-                end = result_text.rindex("}") + 1
-                data = json.loads(result_text[start:end])
-                if "success" in data:
-                    return data
-        except (json.JSONDecodeError, ValueError):
-            pass
+        data = self._extract_json_from_text(result_text)
+        if isinstance(data, dict) and "success" in data:
+            return data
         return {"success": False, "raw": result_text}
 
     def _extract_expert_validation_summary(self, parsed_result: dict) -> dict:

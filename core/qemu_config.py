@@ -250,7 +250,13 @@ QEMU_PARAMS = {
         "root_device": "/dev/vda1",
         "console": "ttyAMA0",
         "filesystem": "ext4",
-        "cpu": "cortex-a57",
+        # 用 -cpu max 而非 cortex-a57。cortex-a57 是 ARMv8.0，缺很多扩展；
+        # 私有固件（如 TP-Link TL-7DR7290 的 glibc-2.30 + busybox/dms）会用到
+        # cortex-a57 不支持的 ARMv8.x 指令，导致 init 执行首条即 SIGILL：
+        #   "Attempted to kill init! exitcode=0x00000004"
+        # -cpu max 暴露 QEMU TCG 能模拟的全部特性（含 crypto/SVE/LSE/PAC 等），
+        # 是 cortex-a57 的严格超集，不会破坏原本可启动的 arm64 固件。
+        "cpu": "max",
         "memory": "1G",
     },
     "mips": {

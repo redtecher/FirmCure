@@ -44,26 +44,68 @@ class Radare2Backend:
 
     # ── 会话管理 ──────────────────────────────────────────────
 
+    def _session_key(self, binary_path: str) -> str:
+        """会话键统一用解析后的宿主机绝对路径。
+
+        agent 受 file-tool 沙箱影响后会传 rootfs 相对路径（如 /bin/dms）。
+        若直接拿去 r2pipe.open 会去开宿主机 /bin/dms → "Cannot open /bin/dms"，
+        整条 r2 分析链断在第一步（case 019/020 的 httpd_service 变薄/为空、
+        依赖与 nvram 分析无法进行的根因）。用解析后路径做键，相对/绝对两种
+        写法命中同一会话，且 r2pipe.open 拿到的是真实存在的文件。
+        """
+        resolved = self._resolve_binary_path(binary_path)
+        if resolved and os.path.exists(resolved):
+            return resolved
+        return binary_path
+
     def _open_binary(self, binary_path: str) -> Any:
-        if binary_path not in self._sessions:
-            r2 = r2pipe.open(binary_path, flags=["-2"])
-            self._cmd(r2, "aa")
-            self._sessions[binary_path] = {
+        key = self._session_key(binary_path)
+        if key not in self._sessions:
+            r2 = r2pipe.open(key, flags=["-2"])
+            # 不在此处急切执行 aa：大型无 section 二进制（如 /bin/dms 9MB）
+            # aa 需数十秒，会拖慢 open_file 甚至触发 60s 超时。ij/iij/izz/iSj 等
+            # i-命令不需要分析结果，改为在真正依赖分析的方法里懒加载（见 _ensure_analyzed）。
+            self._sessions[key] = {
                 "r2": r2,
                 "strings_cache": None,
+                "analyzed": False,
             }
-        return self._sessions[binary_path]["r2"]
+        return self._sessions[key]["r2"]
+
+    def _ensure_analyzed(self, binary_path: str) -> None:
+        """懒执行 r2 分析 (aa)，每个会话只跑一次。
+
+        仅 list_functions / disassemble_function / analyze_function / xrefs 等
+        依赖分析结果的方法需要；info / imports / strings / segments 等 i-命令不需要。
+        """
+        key = self._session_key(binary_path)
+        session = self._sessions.get(key)
+        if not session or session.get("analyzed"):
+            return
+        self._cmd(session["r2"], "aa")
+        session["analyzed"] = True
 
     def _get_r2(self, binary_path: str) -> Any:
         return self._open_binary(binary_path)
 
+    def _get_r2_analyzed(self, binary_path: str) -> Any:
+        """获取已执行 aa 分析的 r2 会话。
+
+        供 list_functions / disassemble_function / analyze_function / xrefs 等
+        依赖分析结果的方法使用；info / imports / strings / segments 等用 _get_r2 即可。
+        """
+        r2 = self._open_binary(binary_path)
+        self._ensure_analyzed(binary_path)
+        return r2
+
     def _close_binary(self, binary_path: str) -> bool:
-        if binary_path in self._sessions:
+        key = self._session_key(binary_path)
+        if key in self._sessions:
             try:
-                self._sessions[binary_path]["r2"].quit()
+                self._sessions[key]["r2"].quit()
             except Exception:
                 pass
-            del self._sessions[binary_path]
+            del self._sessions[key]
             return True
         return False
 
@@ -119,7 +161,7 @@ class Radare2Backend:
 
     def list_functions(self, binary_path: str, filter_name: str = "",
                        offset: int = 0, count: int = 100) -> dict:
-        r2 = self._get_r2(binary_path)
+        r2 = self._get_r2_analyzed(binary_path)
         functions = self._cmdj(r2, "aflj") or []
         if filter_name:
             functions = [f for f in functions
@@ -137,7 +179,7 @@ class Radare2Backend:
 
     def disassemble_function(self, binary_path: str, address: str) -> dict:
         """获取函数完整信息：反编译 + 汇编 + 签名"""
-        r2 = self._get_r2(binary_path)
+        r2 = self._get_r2_analyzed(binary_path)
         self._cmd(r2, f"s {address}")
         info = self._cmdj(r2, f"afij @ {address}")
         signature = self._cmd(r2, f"afs @ {address}")
@@ -153,7 +195,7 @@ class Radare2Backend:
 
     def analyze_function(self, binary_path: str, address: str) -> dict:
         """综合函数分析：信息 + xrefs + 字符串 + 反编译 + 签名"""
-        r2 = self._get_r2(binary_path)
+        r2 = self._get_r2_analyzed(binary_path)
         info = self._cmdj(r2, f"afij @ {address}")
         xrefs_to = self._cmdj(r2, f"axtj @ {address}")
         xrefs_from = self._cmdj(r2, f"axfj @ {address}")
@@ -173,11 +215,11 @@ class Radare2Backend:
         }
 
     def xrefs_to(self, binary_path: str, address: str) -> list:
-        r2 = self._get_r2(binary_path)
+        r2 = self._get_r2_analyzed(binary_path)
         return self._cmdj(r2, f"axtj @ {address}") or []
 
     def xrefs_from(self, binary_path: str, address: str) -> list:
-        r2 = self._get_r2(binary_path)
+        r2 = self._get_r2_analyzed(binary_path)
         return self._cmdj(r2, f"axfj @ {address}") or []
 
     def get_imports(self, binary_path: str) -> list:
@@ -195,7 +237,7 @@ class Radare2Backend:
     def get_strings(self, binary_path: str, filter_text: str = "",
                     offset: int = 0, count: int = 100) -> dict:
         r2 = self._get_r2(binary_path)
-        session = self._sessions[binary_path]
+        session = self._sessions[self._session_key(binary_path)]
         if session["strings_cache"] is None:
             result = self._cmdj(r2, "izzj", timeout=60)
             session["strings_cache"] = result if result is not None else []
@@ -421,7 +463,7 @@ def create_radare2_tools(rootfs_path: str = "") -> list:
 
     tools.append(open_file)
 
-    # ── analyze: 运行分析（已在 open_file 时自动执行 aa，此工具可执行深度分析）──
+    # ── analyze: 运行分析（aa 现为懒加载，此工具可执行深度分析）──
     @tool("analyze")
     def analyze(binary_path: str, command: str = "aaa") -> str:
         """Run deeper radare2 analysis on a binary (e.g., 'aaa' for full analysis, 'aac' for call analysis).
@@ -432,6 +474,10 @@ def create_radare2_tools(rootfs_path: str = "") -> list:
         """
         r2 = backend._get_r2(binary_path)
         result = backend._cmd(r2, command, timeout=60)
+        # aaa/aar 等是 aa 的超集，标记已分析，避免后续 list_functions 等再重跑 aa
+        session = backend._sessions.get(backend._session_key(binary_path))
+        if session and command and command.startswith("aa"):
+            session["analyzed"] = True
         return json.dumps({"success": True, "output": result or ""}, ensure_ascii=False)
 
     tools.append(analyze)
