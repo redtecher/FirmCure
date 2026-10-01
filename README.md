@@ -21,13 +21,6 @@
 
 FirmCure automates IoT firmware emulation using LLM-powered agents. Given an extracted firmware rootfs, it analyzes the firmware, builds a QEMU virtual machine, and fixes runtime crashes — achieving a fully interactive emulated web service with no manual intervention.
 
-## Publication
-
-**FIRMCURE: Towards Autonomous and Adaptive Rehosting of Linux-Based Firmware**
-
-📄 [arXiv:2606.24549](https://arxiv.org/abs/2606.24549) | [PDF](https://arxiv.org/pdf/2606.24549)
-
-
 ## Features
 
 - **Automated Analysis**: Deep firmware analysis including CPU architecture, HTTPD discovery, startup tracing, and dependency mapping
@@ -244,20 +237,6 @@ FirmCure provides 42+ specialized tools across 4 categories:
 
 
 Any firmware with an extractable rootfs and HTTPD binary is supported.
-
-## Continuous Testing Dataset
-
-FirmCure maintains a continuously updated dataset of firmware rehosting experiments at:
-
-**[🔬 redtecher.cn/experiments-data](https://redtecher.cn/experiments-data/)**
-
-This dataset includes:
-- Real-time test results from ongoing firmware analysis
-- Performance metrics and success rates
-- Detailed logs and intervention strategies
-- Cross-vendor compatibility data
-
-The dataset provides transparency into FirmCure's capabilities and serves as a benchmark for firmware rehosting research.
 
 ## Output Directory Structure
 
