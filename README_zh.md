@@ -21,12 +21,6 @@
 
 FirmCure 使用 LLM 驱动的智能体自动完成 IoT 固件重托管。给定已解压的固件 rootfs，它能自动分析固件、构建 QEMU 虚拟机、修复运行时崩溃——零人工干预实现完整的 Web 服务重托管。
 
-## 发表论文
-
-**FIRMCURE: Towards Autonomous and Adaptive Rehosting of Linux-Based Firmware**
-
-📄 [arXiv:2606.24549](https://arxiv.org/abs/2606.24549) | [PDF](https://arxiv.org/pdf/2606.24549)
-
 
 ## 核心特性
 
@@ -244,20 +238,6 @@ FirmCure 提供 42+ 专业工具，分为 4 大类：
 
 
 任何具有可提取 rootfs 和 HTTPD 二进制的固件均支持。
-
-## 持续测试数据集
-
-FirmCure 维护着一个持续更新的固件重托管实验数据集：
-
-**[🔬 redtecher.cn/experiments-data](https://redtecher.cn/experiments-data/)**
-
-该数据集包括：
-- 实时固件分析测试结果
-- 性能指标和成功率统计
-- 详细日志和干预策略
-- 跨厂商兼容性数据
-
-这个数据集提供了 FirmCure 能力的透明度，并作为固件重托管研究的基准测试。
 
 ## 输出目录结构
 
